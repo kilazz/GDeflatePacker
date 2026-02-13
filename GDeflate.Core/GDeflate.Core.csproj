@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<RootNamespace>GDeflate.Core</RootNamespace>
+		<!-- Required for pointers and NativeMemory -->
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	</PropertyGroup>
+	<ItemGroup>
+		<!--
+      Copy GDeflateCPU.dll to the root output directory.
+      This ensures DllImport finds it immediately without relying on complex resolvers.
+    -->
+		<Content Include="libs\GDeflateCPU.dll">
+			<Link>GDeflateCPU.dll</Link>
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Pack>true</Pack>
+			<PackagePath>contentFiles\any\any</PackagePath>
+		</Content>
+	</ItemGroup>
+</Project>
