@@ -10,12 +10,14 @@ namespace GDeflate.Core
     /// <summary>
     /// Standard GDeflate Processor.
     /// Implements Chunked Streaming compression.
-    /// Updated to support DirectStorage compliant "Pure Data" layout for packages.
+    /// Supports DirectStorage compliant "Pure Data" layout for packages.
+    /// Standardized on Version 1 (Header-at-Front).
     /// </summary>
     public class GDeflateProcessor
     {
         // 64KB is the standard page size for GPU decompression scenarios
         private const int ChunkSize = 65536;
+        private const int CurrentVersion = 1;
 
         public bool IsCpuLibraryAvailable() => GDeflateCpuApi.IsAvailable();
 
@@ -183,7 +185,7 @@ namespace GDeflate.Core
                     // 3. Write Output
                     if (writeInlineHeaders)
                     {
-                        // Legacy/Single File Mode: Needs headers to describe itself
+                        // Single File Mode: Needs headers to describe itself
                         BitConverter.TryWriteBytes(new Span<byte>(headerBuffer, 0, 4), (int)compressedSize);
                         BitConverter.TryWriteBytes(new Span<byte>(headerBuffer, 4, 4), bytesRead);
                         fsOut.Write(headerBuffer);
@@ -214,7 +216,7 @@ namespace GDeflate.Core
             // Magic (GCHK) + Version (1) + TotalOriginalSize (8)
             byte[] header = new byte[16];
             Encoding.ASCII.GetBytes("GCHK").CopyTo(header, 0);
-            BitConverter.TryWriteBytes(new Span<byte>(header, 4, 4), 1);
+            BitConverter.TryWriteBytes(new Span<byte>(header, 4, 4), CurrentVersion);
             BitConverter.TryWriteBytes(new Span<byte>(header, 8, 8), (ulong)fsIn.Length);
             fsOut.Write(header);
 
@@ -238,10 +240,7 @@ namespace GDeflate.Core
             }
             else
             {
-                // Fallback to Legacy Single Pass
-                fsIn.Seek(0, SeekOrigin.Begin);
-                DecompressLegacy(fsIn, outputFile, token);
-                return;
+                throw new InvalidDataException("Invalid GDeflate file signature.");
             }
 
             using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
@@ -294,40 +293,6 @@ namespace GDeflate.Core
             }
         }
 
-        private unsafe void DecompressLegacy(FileStream fsIn, string outputFile, CancellationToken token)
-        {
-            byte[] sizeBuffer = new byte[8];
-            fsIn.ReadExactly(sizeBuffer);
-            ulong originalSize = BitConverter.ToUInt64(sizeBuffer, 0);
-
-            long compressedPayloadSize = fsIn.Length - 8;
-            using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
-
-            void* pInput = NativeMemory.Alloc((nuint)compressedPayloadSize);
-            void* pOutput = NativeMemory.Alloc((nuint)originalSize);
-
-            try
-            {
-                using (var umsIn = new UnmanagedMemoryStream((byte*)pInput, compressedPayloadSize, compressedPayloadSize, FileAccess.Write))
-                {
-                    fsIn.CopyTo(umsIn);
-                }
-
-                bool success = GDeflateCpuApi.Decompress(pOutput, originalSize, pInput, (ulong)compressedPayloadSize, (uint)Environment.ProcessorCount);
-                if (!success) throw new Exception("Legacy decompression failed.");
-
-                using (var umsOut = new UnmanagedMemoryStream((byte*)pOutput, (long)originalSize, (long)originalSize, FileAccess.Read))
-                {
-                    umsOut.CopyTo(fsOut);
-                }
-            }
-            finally
-            {
-                NativeMemory.Free(pInput);
-                NativeMemory.Free(pOutput);
-            }
-        }
-
         #endregion
 
         #region Game Package Operations (DirectStorage Optimized)
@@ -340,67 +305,121 @@ namespace GDeflate.Core
             public List<int> ChunkSizes; // Store table of chunk sizes for this file
         }
 
+        /// <summary>
+        /// Standard Generation: Header-at-Front.
+        /// Uses a temp file to compress data, calculates offsets, writes Head, then appends Body.
+        /// This ensures the final file is optimized for Runtime Reading (DirectStorage).
+        /// </summary>
         private unsafe void CompressGamePackage(IDictionary<string, string> fileMap, string outputPath, IProgress<int>? progress, CancellationToken token)
         {
-            using var fsPackage = new FileStream(outputPath, FileMode.Create, FileAccess.ReadWrite);
-
-            // 1. Write Header Placeholder
-            // We don't know the DirectoryOffset yet.
-            fsPackage.Write(Encoding.ASCII.GetBytes("GPCK")); // 4 bytes
-            fsPackage.Write(BitConverter.GetBytes(2));        // 4 bytes: Version 2 (No Inline Headers)
-            fsPackage.Write(BitConverter.GetBytes((long)0));  // 8 bytes: Directory Offset placeholder
-
-            // Align to 4096 before first file
-            PadToAlignment(fsPackage, 4096);
-
+            // 1. Create a Temp File for the Body (Compressed Data)
+            string tempPath = Path.GetTempFileName();
             var entries = new List<PackageEntry>();
-            int current = 0;
 
-            foreach (var kvp in fileMap)
+            try
             {
-                token.ThrowIfCancellationRequested();
-
-                string inputFile = kvp.Key;
-                string relativePath = kvp.Value;
-                long fileStartOffset = fsPackage.Position;
-                long originalSize = new FileInfo(inputFile).Length;
-
-                List<int> chunkSizes;
-
-                if (originalSize > 0)
+                using (var fsTemp = new FileStream(tempPath, FileMode.Create, FileAccess.ReadWrite))
                 {
-                    using (var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    int current = 0;
+                    foreach (var kvp in fileMap)
                     {
-                        // Write RAW compressed data (no inline headers)
-                        chunkSizes = StreamCompress(fsIn, fsPackage, (ulong)originalSize, token, false);
+                        token.ThrowIfCancellationRequested();
+
+                        // Force alignment in the temp stream relative to the start of the DATA BLOCK.
+                        // We will map this to the final file later.
+                        PadToAlignment(fsTemp, 4096);
+
+                        string inputFile = kvp.Key;
+                        string relativePath = kvp.Value;
+                        long fileStartRelativeOffset = fsTemp.Position; // Offset relative to start of Data Blob
+                        long originalSize = new FileInfo(inputFile).Length;
+
+                        List<int> chunkSizes;
+
+                        if (originalSize > 0)
+                        {
+                            using (var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read))
+                            {
+                                // Write RAW compressed data (no inline headers)
+                                chunkSizes = StreamCompress(fsIn, fsTemp, (ulong)originalSize, token, false);
+                            }
+                        }
+                        else
+                        {
+                            chunkSizes = new List<int>();
+                        }
+
+                        entries.Add(new PackageEntry
+                        {
+                            Path = relativePath,
+                            Offset = fileStartRelativeOffset, // Store relative offset for now
+                            OriginalSize = originalSize,
+                            ChunkSizes = chunkSizes
+                        });
+
+                        current++;
+                        progress?.Report((int)((current / (float)fileMap.Count) * 100));
                     }
                 }
-                else
+
+                // 2. Calculate Directory Size
+                // We simulate writing the directory to calculate the exact header size required.
+                long directorySizeBytes;
+                using (var msCalc = new MemoryStream())
+                using (var bwCalc = new BinaryWriter(msCalc, Encoding.UTF8))
                 {
-                    chunkSizes = new List<int>();
+                    WriteDirectory(bwCalc, entries);
+                    directorySizeBytes = msCalc.Position;
                 }
 
-                entries.Add(new PackageEntry
+                // Header = 16 bytes.
+                // Directory starts at 16.
+                // Data starts at Align4K(16 + directorySizeBytes).
+                long dataStartOffset = 16 + directorySizeBytes;
+                long paddingNeeded = (4096 - (dataStartOffset % 4096)) % 4096;
+                long finalDataOffset = dataStartOffset + paddingNeeded;
+
+                // 3. Construct Final File
+                using (var fsFinal = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+                using (var bwFinal = new BinaryWriter(fsFinal, Encoding.UTF8))
                 {
-                    Path = relativePath,
-                    Offset = fileStartOffset,
-                    OriginalSize = originalSize,
-                    ChunkSizes = chunkSizes
-                });
+                    // A. Write Header
+                    bwFinal.Write(Encoding.ASCII.GetBytes("GPCK")); // Magic
+                    bwFinal.Write((int)CurrentVersion);             // Version 1 (Header at Front)
+                    bwFinal.Write((long)16);                        // Directory Offset (Immediately after header)
 
-                // Post-file padding (Align next file to 4K)
-                PadToAlignment(fsPackage, 4096);
+                    // B. Write Directory (With corrected Absolute Offsets)
+                    // Update offsets to include the Header+Directory size
+                    for(int i=0; i<entries.Count; i++)
+                    {
+                        var e = entries[i];
+                        e.Offset += finalDataOffset;
+                        entries[i] = e;
+                    }
+                    WriteDirectory(bwFinal, entries);
 
-                current++;
-                progress?.Report((int)((current / (float)fileMap.Count) * 100));
+                    // C. Write Padding
+                    if (paddingNeeded > 0)
+                    {
+                        bwFinal.Write(new byte[paddingNeeded]);
+                    }
+
+                    // D. Append Body (Temp File)
+                    using (var fsTemp = new FileStream(tempPath, FileMode.Open, FileAccess.Read))
+                    {
+                        fsTemp.CopyTo(fsFinal);
+                    }
+                }
             }
+            finally
+            {
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+        }
 
-            // 2. Write Directory (Metadata) at the end of the file
-            long directoryOffset = fsPackage.Position;
-            using var bw = new BinaryWriter(fsPackage, Encoding.UTF8, true);
-
+        private void WriteDirectory(BinaryWriter bw, List<PackageEntry> entries)
+        {
             bw.Write(entries.Count);
-
             foreach (var entry in entries)
             {
                 byte[] pathBytes = Encoding.UTF8.GetBytes(entry.Path);
@@ -411,15 +430,11 @@ namespace GDeflate.Core
 
                 // Write Chunk Table for this file
                 bw.Write(entry.ChunkSizes.Count);
-                foreach(int size in entry.ChunkSizes)
+                foreach (int size in entry.ChunkSizes)
                 {
                     bw.Write(size);
                 }
             }
-
-            // 3. Update Global Header
-            fsPackage.Position = 8; // Offset of DirectoryOffset
-            fsPackage.Write(BitConverter.GetBytes(directoryOffset));
         }
 
         private unsafe void ExtractGamePackage(string packagePath, string outputDirectory, IProgress<int>? progress, CancellationToken token)
@@ -433,8 +448,8 @@ namespace GDeflate.Core
                 throw new InvalidDataException("Invalid Game Package file signature.");
 
             int version = br.ReadInt32();
-            if (version != 2)
-                throw new InvalidDataException($"Unsupported GPCK version: {version}. This tool supports Version 2.");
+            if (version != CurrentVersion)
+                throw new InvalidDataException($"Unsupported GPCK version: {version}. Expected Version {CurrentVersion}.");
 
             long directoryOffset = br.ReadInt64();
 

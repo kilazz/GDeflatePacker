@@ -186,6 +186,8 @@ namespace GDeflateCLI
                 }
 
                 Console.WriteLine($"Version: {info.Version}");
+                Console.WriteLine("Layout: Standard (Header-at-Front)");
+
                 Console.WriteLine($"File Count: {info.FileCount}");
                 Console.WriteLine($"Total Size: {info.TotalSize / 1024.0 / 1024.0:F2} MB");
                 Console.WriteLine(new string('-', 60));
@@ -265,12 +267,12 @@ namespace GDeflateCLI
             Console.WriteLine("GDeflate CLI Tool (CPU)");
             Console.WriteLine("Usage: GDeflateCLI <command> <input> [output]");
             Console.WriteLine("Commands:");
-            Console.WriteLine("  compress (-c)   : Compress file or folder");
-            Console.WriteLine("  decompress (-d) : Decompress archive");
-            Console.WriteLine("  info (-i)       : Inspect archive structure & alignment");
+            Console.WriteLine("compress (-c) : Compress file or folder");
+            Console.WriteLine("decompress (-d) : Decompress archive");
+            Console.WriteLine("info (-i) : Inspect archive structure & alignment");
             Console.WriteLine("Examples:");
-            Console.WriteLine("  GDeflateCLI compress data/ levels.gpck");
-            Console.WriteLine("  GDeflateCLI info levels.gpck");
+            Console.WriteLine("GDeflateCLI compress data/ levels.gpck");
+            Console.WriteLine("GDeflateCLI info levels.gpck");
         }
 
         static void PrintSuccess(string msg)
