@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -10,64 +11,53 @@ namespace GDeflate.Core
     /// <summary>
     /// Standard GDeflate Processor.
     /// Implements Chunked Streaming compression.
-    /// Supports DirectStorage compliant "Pure Data" layout for packages.
-    /// Standardized on Version 1 (Header-at-Front).
+    /// Format v1: [Header & Directory] [Padding] [Data Blob (Aligned 4K)]
+    /// Optimized for DirectStorage (Header-First).
     /// </summary>
     public class GDeflateProcessor
     {
         // 64KB is the standard page size for GPU decompression scenarios
         private const int ChunkSize = 65536;
         private const int CurrentVersion = 1;
+        private const string MagicSignature = "GPCK";
 
         public bool IsCpuLibraryAvailable() => GDeflateCpuApi.IsAvailable();
 
         #region Public API
 
-        public void CompressFilesToArchive(IDictionary<string, string> fileMap, string outputPath, string format, IProgress<int>? progress = null, CancellationToken token = default)
+        /// <summary>
+        /// Helper to generate a consistent file map from a directory, removing logic duplication from clients.
+        /// </summary>
+        public static Dictionary<string, string> BuildFileMap(string sourceDirectory)
+        {
+            var map = new Dictionary<string, string>();
+            string rootDir = Path.GetFullPath(sourceDirectory);
+            if (!rootDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                rootDir += Path.DirectorySeparatorChar;
+
+            // Use enumeration options for faster file system iteration
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true };
+
+            foreach (var file in Directory.EnumerateFiles(rootDir, "*", options))
+            {
+                // Create relative path
+                string relative = Path.GetRelativePath(rootDir, file);
+                // Normalize to forward slashes for internal archive consistency
+                map[file] = relative.Replace('\\', '/');
+            }
+            return map;
+        }
+
+        public void CompressFilesToArchive(IDictionary<string, string> fileMap, string outputPath, IProgress<int>? progress = null, CancellationToken token = default)
         {
             EnsureBackend();
-
-            if (format.Equals(".gpck", StringComparison.OrdinalIgnoreCase))
-            {
-                CompressGamePackage(fileMap, outputPath, progress, token);
-            }
-            else if (format.Equals(".gdef", StringComparison.OrdinalIgnoreCase))
-            {
-                if (fileMap.Count != 1)
-                    throw new ArgumentException("GDEF format only supports single file compression.");
-
-                foreach (var kvp in fileMap)
-                {
-                    CompressFileChunked(kvp.Key, outputPath, progress, token);
-                    return;
-                }
-            }
-            else
-            {
-                throw new NotSupportedException($"Format {format} is not supported.");
-            }
+            CompressGamePackage(fileMap, outputPath, progress, token);
         }
 
         public void DecompressArchive(string inputPath, string outputDirectory, IProgress<int>? progress = null, CancellationToken token = default)
         {
             EnsureBackend();
-            string ext = Path.GetExtension(inputPath).ToLower();
-
-            if (ext == ".gdef")
-            {
-                string outputName = Path.GetFileNameWithoutExtension(inputPath);
-                string fullOutputPath = Path.Combine(outputDirectory, outputName);
-                DecompressFileChunked(inputPath, fullOutputPath, progress, token);
-                progress?.Report(100);
-            }
-            else if (ext == ".gpck")
-            {
-                ExtractGamePackage(inputPath, outputDirectory, progress, token);
-            }
-            else
-            {
-                throw new NotSupportedException($"Format {ext} is not supported.");
-            }
+            ExtractGamePackage(inputPath, outputDirectory, progress, token);
         }
 
         public PackageInfo InspectPackage(string packagePath)
@@ -75,37 +65,38 @@ namespace GDeflate.Core
             using var fs = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             using var br = new BinaryReader(fs, Encoding.UTF8, true);
 
-            var info = new PackageInfo { FilePath = packagePath, TotalSize = fs.Length };
+            var info = new PackageInfo
+            {
+                FilePath = packagePath,
+                TotalSize = fs.Length
+            };
 
-            // Read Header
+            // Read Header at 0
+            if (fs.Length < 4) return info;
+
             byte[] magic = br.ReadBytes(4);
-            string magicStr = Encoding.ASCII.GetString(magic);
-            info.Magic = magicStr;
+            info.Magic = Encoding.ASCII.GetString(magic);
 
-            if (magicStr != "GPCK") return info;
+            if (info.Magic != MagicSignature) return info;
 
             info.Version = br.ReadInt32();
-            long directoryOffset = br.ReadInt64();
+            info.FileCount = br.ReadInt32();
+            long dataStartOffset = br.ReadInt64(); // Pointer to where data actually begins
 
-            // Read Directory
-            fs.Position = directoryOffset;
-            int fileCount = br.ReadInt32();
-            info.FileCount = fileCount;
-
-            for (int i = 0; i < fileCount; i++)
+            // Read Directory immediately following header
+            for (int i = 0; i < info.FileCount; i++)
             {
                 int pathLen = br.ReadInt32();
                 byte[] pathBytes = br.ReadBytes(pathLen);
                 string path = Encoding.UTF8.GetString(pathBytes);
                 long offset = br.ReadInt64();
                 long origSize = br.ReadInt64();
+                long compSize = br.ReadInt64(); // Total compressed size of file
 
                 int chunkCount = br.ReadInt32();
-                long compressedSize = 0;
-                for (int c = 0; c < chunkCount; c++)
-                {
-                    compressedSize += br.ReadInt32();
-                }
+                // Skip reading individual chunk sizes for inspection summary
+                long chunksMetaSize = chunkCount * 4;
+                fs.Seek(chunksMetaSize, SeekOrigin.Current);
 
                 bool isAligned = (offset % 4096) == 0;
 
@@ -114,7 +105,7 @@ namespace GDeflate.Core
                     Path = path,
                     Offset = offset,
                     OriginalSize = origSize,
-                    CompressedSize = compressedSize,
+                    CompressedSize = compSize,
                     Is4KAligned = isAligned,
                     ChunkCount = chunkCount
                 });
@@ -125,315 +116,193 @@ namespace GDeflate.Core
 
         #endregion
 
-        #region Helper Methods
-
-        private void PadToAlignment(Stream stream, int alignment)
-        {
-            long currentOffset = stream.Position;
-            long padding = (alignment - (currentOffset % alignment)) % alignment;
-            if (padding > 0)
-            {
-                stream.Write(new byte[padding]);
-            }
-        }
-
-        #endregion
-
         #region Chunked Operations (Streaming)
 
-        /// <summary>
-        /// Compresses a stream in 64KB chunks.
-        /// Returns the list of compressed chunk sizes (bytes).
-        /// if `writeInlineHeaders` is true, it writes [CompSize][OrigSize] before data (for .gdef).
-        /// if `writeInlineHeaders` is false, it writes RAW data only (for .gpck).
-        /// </summary>
-        private unsafe List<int> StreamCompress(Stream fsIn, Stream fsOut, ulong inputSize, CancellationToken token, bool writeInlineHeaders)
+        // Optimization: Appends to a shared List<int> to avoid allocating a new List per file.
+        private unsafe void StreamCompress(Stream fsIn, Stream fsOut, ulong inputSize, byte* pInput, byte* pOutput, ulong bound, List<int> globalChunkList, CancellationToken token)
         {
-            void* pInput = null;
-            void* pOutput = null;
-            var chunkSizes = new List<int>();
+            long remaining = (long)inputSize;
 
-            try
+            while (remaining > 0)
             {
-                // Allocate buffers once
-                pInput = NativeMemory.Alloc(ChunkSize);
-                ulong bound = GDeflateCpuApi.CompressBound(ChunkSize);
-                pOutput = NativeMemory.Alloc((nuint)bound);
+                token.ThrowIfCancellationRequested();
 
-                byte[] headerBuffer = new byte[8]; // [CompSize(4)][OrigSize(4)]
-                long remaining = (long)inputSize;
+                int bytesToRead = (int)Math.Min(ChunkSize, remaining);
+                var inputSpan = new Span<byte>(pInput, bytesToRead);
+                int bytesRead = fsIn.Read(inputSpan);
 
-                while (remaining > 0)
-                {
-                    token.ThrowIfCancellationRequested();
+                if (bytesRead == 0) break;
 
-                    // 1. Read Chunk
-                    int bytesToRead = (int)Math.Min(ChunkSize, remaining);
-                    var inputSpan = new Span<byte>(pInput, bytesToRead);
-                    int bytesRead = fsIn.Read(inputSpan);
+                byte* pCompressDest = pOutput;
+                ulong compressedSize = bound;
 
-                    if (bytesRead == 0) break;
+                bool success = GDeflateCpuApi.Compress(pCompressDest, ref compressedSize, pInput, (ulong)bytesRead, 12, 0);
+                if (!success) throw new Exception("GDeflate chunk compression failed.");
 
-                    // 2. Compress Chunk
-                    ulong compressedSize = bound;
-                    bool success = GDeflateCpuApi.Compress(pOutput, ref compressedSize, pInput, (ulong)bytesRead, 12, 0);
+                // Direct append to the flattened list (Zero Allocation for list structure)
+                globalChunkList.Add((int)compressedSize);
 
-                    if (!success) throw new Exception("GDeflate chunk compression failed.");
+                var outputSpan = new ReadOnlySpan<byte>(pCompressDest, (int)compressedSize);
+                fsOut.Write(outputSpan);
 
-                    chunkSizes.Add((int)compressedSize);
-
-                    // 3. Write Output
-                    if (writeInlineHeaders)
-                    {
-                        // Single File Mode: Needs headers to describe itself
-                        BitConverter.TryWriteBytes(new Span<byte>(headerBuffer, 0, 4), (int)compressedSize);
-                        BitConverter.TryWriteBytes(new Span<byte>(headerBuffer, 4, 4), bytesRead);
-                        fsOut.Write(headerBuffer);
-                    }
-
-                    // Write Compressed Data
-                    var outputSpan = new ReadOnlySpan<byte>(pOutput, (int)compressedSize);
-                    fsOut.Write(outputSpan);
-
-                    remaining -= bytesRead;
-                }
-            }
-            finally
-            {
-                if (pInput != null) NativeMemory.Free(pInput);
-                if (pOutput != null) NativeMemory.Free(pOutput);
-            }
-
-            return chunkSizes;
-        }
-
-        private unsafe void CompressFileChunked(string inputFile, string outputFile, IProgress<int>? progress, CancellationToken token)
-        {
-            using var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024);
-            using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
-
-            // File Header
-            // Magic (GCHK) + Version (1) + TotalOriginalSize (8)
-            byte[] header = new byte[16];
-            Encoding.ASCII.GetBytes("GCHK").CopyTo(header, 0);
-            BitConverter.TryWriteBytes(new Span<byte>(header, 4, 4), CurrentVersion);
-            BitConverter.TryWriteBytes(new Span<byte>(header, 8, 8), (ulong)fsIn.Length);
-            fsOut.Write(header);
-
-            // Stream Body with Inline Headers
-            StreamCompress(fsIn, fsOut, (ulong)fsIn.Length, token, true);
-        }
-
-        private unsafe void DecompressFileChunked(string inputFile, string outputFile, IProgress<int>? progress, CancellationToken token)
-        {
-            using var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read);
-
-            // 1. Check Header
-            byte[] header = new byte[16];
-            int read = fsIn.Read(header, 0, 16);
-
-            long totalSize = 0;
-
-            if (read >= 4 && Encoding.ASCII.GetString(header, 0, 4) == "GCHK")
-            {
-                totalSize = BitConverter.ToInt64(header, 8); // For progress tracking
-            }
-            else
-            {
-                throw new InvalidDataException("Invalid GDeflate file signature.");
-            }
-
-            using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
-
-            void* pInput = null;
-            void* pOutput = null;
-
-            try
-            {
-                ulong maxCompBound = GDeflateCpuApi.CompressBound(ChunkSize);
-                pInput = NativeMemory.Alloc((nuint)maxCompBound);
-                pOutput = NativeMemory.Alloc(ChunkSize);
-
-                byte[] headerBuffer = new byte[8];
-                long totalDecompressed = 0;
-
-                while (fsIn.Position < fsIn.Length)
-                {
-                    token.ThrowIfCancellationRequested();
-
-                    // Read Chunk Header [CompSize(4)][OrigSize(4)]
-                    int hRead = fsIn.Read(headerBuffer, 0, 8);
-                    if (hRead == 0) break;
-                    if (hRead < 8) throw new EndOfStreamException("Truncated chunk header.");
-
-                    int compSize = BitConverter.ToInt32(headerBuffer, 0);
-                    int origSize = BitConverter.ToInt32(headerBuffer, 4);
-
-                    // Read Compressed Data
-                    var inputSpan = new Span<byte>(pInput, compSize);
-                    int dataRead = fsIn.Read(inputSpan);
-                    if (dataRead != compSize) throw new EndOfStreamException("Truncated chunk body.");
-
-                    // Decompress
-                    bool success = GDeflateCpuApi.Decompress(pOutput, (ulong)origSize, pInput, (ulong)compSize, 1);
-                    if (!success) throw new Exception("Chunk decompression failed.");
-
-                    // Write to Disk
-                    var outputSpan = new ReadOnlySpan<byte>(pOutput, origSize);
-                    fsOut.Write(outputSpan);
-
-                    totalDecompressed += origSize;
-                    if (totalSize > 0) progress?.Report((int)((totalDecompressed / (double)totalSize) * 100));
-                }
-            }
-            finally
-            {
-                if (pInput != null) NativeMemory.Free(pInput);
-                if (pOutput != null) NativeMemory.Free(pOutput);
+                remaining -= bytesRead;
             }
         }
 
         #endregion
 
-        #region Game Package Operations (DirectStorage Optimized)
+        #region Game Package Operations (Header-First / Reserved)
 
         private struct PackageEntry
         {
             public string Path;
             public long Offset;
             public long OriginalSize;
-            public List<int> ChunkSizes; // Store table of chunk sizes for this file
+            public long CompressedSize;
+            // Flattened optimization: We only store indices, not a whole List object
+            public int ChunkStartIndex;
+            public int ChunkCount;
         }
 
-        /// <summary>
-        /// Standard Generation: Header-at-Front.
-        /// Uses a temp file to compress data, calculates offsets, writes Head, then appends Body.
-        /// This ensures the final file is optimized for Runtime Reading (DirectStorage).
-        /// </summary>
         private unsafe void CompressGamePackage(IDictionary<string, string> fileMap, string outputPath, IProgress<int>? progress, CancellationToken token)
         {
-            // 1. Create a Temp File for the Body (Compressed Data)
-            string tempPath = Path.GetTempFileName();
-            var entries = new List<PackageEntry>();
+            // 1. Estimate Header Size to reserve space at the beginning
+            long estimatedHeaderSize = 16 + 8; // Magic(4)+Ver(4)+Count(4)+DataStart(8) + Safety
+            foreach (var kvp in fileMap)
+            {
+                // Per file: PathLen(4) + Path(N) + Offset(8) + Orig(8) + Comp(8) + ChunkCount(4) + ChunkArray(Cnt*4)
+                // Normalize path length calculation to UTF8
+                long pathBytes = Encoding.UTF8.GetByteCount(kvp.Value.Replace('\\', '/'));
+                long fileSize = new FileInfo(kvp.Key).Length;
+                long maxChunks = (fileSize + ChunkSize - 1) / ChunkSize;
+                if (fileSize == 0) maxChunks = 0;
+
+                estimatedHeaderSize += 4 + pathBytes + 8 + 8 + 8 + 4 + (maxChunks * 4);
+            }
+
+            // Align header reservation to 4KB (DirectStorage requirement for Data Start)
+            long dataStartOffset = (estimatedHeaderSize + 4095) & ~4095;
+
+            var entries = new List<PackageEntry>(fileMap.Count);
+
+            // Optimization: Single large list for all chunks in the entire archive to reduce GC pressure
+            var globalChunkList = new List<int>(fileMap.Count * 4);
+
+            // Alloc Buffers
+            ulong bound = GDeflateCpuApi.CompressBound(ChunkSize);
+            void* pInput = NativeMemory.Alloc(ChunkSize);
+            void* pOutput = NativeMemory.Alloc((nuint)bound);
 
             try
             {
-                using (var fsTemp = new FileStream(tempPath, FileMode.Create, FileAccess.ReadWrite))
+                using (var fsFinal = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+                using (var bwFinal = new BinaryWriter(fsFinal, Encoding.UTF8))
                 {
+                    // 2. Jump to Data Start (Reserve Header Space)
+                    fsFinal.Position = dataStartOffset;
+
                     int current = 0;
+
+                    // 3. Write Data
                     foreach (var kvp in fileMap)
                     {
                         token.ThrowIfCancellationRequested();
 
-                        // Force alignment in the temp stream relative to the start of the DATA BLOCK.
-                        // We will map this to the final file later.
-                        PadToAlignment(fsTemp, 4096);
+                        // Ensure 4K alignment for every file within the data block
+                        long currentPos = fsFinal.Position;
+                        long padding = (4096 - (currentPos % 4096)) % 4096;
+                        if (padding > 0) fsFinal.Write(new byte[padding]);
 
+                        long fileStartOffset = fsFinal.Position;
                         string inputFile = kvp.Key;
-                        string relativePath = kvp.Value;
-                        long fileStartRelativeOffset = fsTemp.Position; // Offset relative to start of Data Blob
+                        // Normalize path to forward slashes for archive portability
+                        string relativePath = kvp.Value.Replace('\\', '/');
+
                         long originalSize = new FileInfo(inputFile).Length;
 
-                        List<int> chunkSizes;
+                        int chunkStartIndex = globalChunkList.Count;
+                        long totalCompSize = 0;
 
                         if (originalSize > 0)
                         {
                             using (var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read))
                             {
-                                // Write RAW compressed data (no inline headers)
-                                chunkSizes = StreamCompress(fsIn, fsTemp, (ulong)originalSize, token, false);
+                                // Pass the global list directly
+                                StreamCompress(fsIn, fsFinal, (ulong)originalSize, (byte*)pInput, (byte*)pOutput, bound, globalChunkList, token);
                             }
-                        }
-                        else
-                        {
-                            chunkSizes = new List<int>();
+
+                            // Calculate compressed size from the added chunks
+                            int chunkCount = globalChunkList.Count - chunkStartIndex;
+                            for (int k = 0; k < chunkCount; k++)
+                                totalCompSize += globalChunkList[chunkStartIndex + k];
                         }
 
                         entries.Add(new PackageEntry
                         {
                             Path = relativePath,
-                            Offset = fileStartRelativeOffset, // Store relative offset for now
+                            Offset = fileStartOffset,
                             OriginalSize = originalSize,
-                            ChunkSizes = chunkSizes
+                            CompressedSize = totalCompSize,
+                            ChunkStartIndex = chunkStartIndex,
+                            ChunkCount = globalChunkList.Count - chunkStartIndex
                         });
 
                         current++;
                         progress?.Report((int)((current / (float)fileMap.Count) * 100));
                     }
-                }
 
-                // 2. Calculate Directory Size
-                // We simulate writing the directory to calculate the exact header size required.
-                long directorySizeBytes;
-                using (var msCalc = new MemoryStream())
-                using (var bwCalc = new BinaryWriter(msCalc, Encoding.UTF8))
-                {
-                    WriteDirectory(bwCalc, entries);
-                    directorySizeBytes = msCalc.Position;
-                }
+                    // 4. Rewind and Write Header
+                    fsFinal.Position = 0;
 
-                // Header = 16 bytes.
-                // Directory starts at 16.
-                // Data starts at Align4K(16 + directorySizeBytes).
-                long dataStartOffset = 16 + directorySizeBytes;
-                long paddingNeeded = (4096 - (dataStartOffset % 4096)) % 4096;
-                long finalDataOffset = dataStartOffset + paddingNeeded;
+                    // Header: [Magic] [Version] [Count] [DataStartOffset]
+                    bwFinal.Write(Encoding.ASCII.GetBytes(MagicSignature));
+                    bwFinal.Write(CurrentVersion);
+                    bwFinal.Write(entries.Count);
+                    bwFinal.Write(dataStartOffset);
 
-                // 3. Construct Final File
-                using (var fsFinal = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
-                using (var bwFinal = new BinaryWriter(fsFinal, Encoding.UTF8))
-                {
-                    // A. Write Header
-                    bwFinal.Write(Encoding.ASCII.GetBytes("GPCK")); // Magic
-                    bwFinal.Write((int)CurrentVersion);             // Version 1 (Header at Front)
-                    bwFinal.Write((long)16);                        // Directory Offset (Immediately after header)
-
-                    // B. Write Directory (With corrected Absolute Offsets)
-                    // Update offsets to include the Header+Directory size
-                    for(int i=0; i<entries.Count; i++)
+                    // Directory
+                    foreach (var entry in entries)
                     {
-                        var e = entries[i];
-                        e.Offset += finalDataOffset;
-                        entries[i] = e;
-                    }
-                    WriteDirectory(bwFinal, entries);
+                        byte[] pathBytes = Encoding.UTF8.GetBytes(entry.Path);
+                        bwFinal.Write(pathBytes.Length);
+                        bwFinal.Write(pathBytes);
+                        bwFinal.Write(entry.Offset);
+                        bwFinal.Write(entry.OriginalSize);
+                        bwFinal.Write(entry.CompressedSize);
+                        bwFinal.Write(entry.ChunkCount);
 
-                    // C. Write Padding
-                    if (paddingNeeded > 0)
-                    {
-                        bwFinal.Write(new byte[paddingNeeded]);
+                        // Write chunks from the global list
+                        for (int i = 0; i < entry.ChunkCount; i++)
+                        {
+                            bwFinal.Write(globalChunkList[entry.ChunkStartIndex + i]);
+                        }
                     }
 
-                    // D. Append Body (Temp File)
-                    using (var fsTemp = new FileStream(tempPath, FileMode.Open, FileAccess.Read))
+                    // 5. Safety Check
+                    if (fsFinal.Position > dataStartOffset)
                     {
-                        fsTemp.CopyTo(fsFinal);
+                        throw new Exception("Header estimation failed. Metadata exceeded reserved space. Increase safety margin.");
+                    }
+
+                    // Pad the remainder of the header with zeros to reach dataStartOffset
+                    long remainingHeader = dataStartOffset - fsFinal.Position;
+                    if (remainingHeader > 0)
+                    {
+                        // Write zeros in chunks to avoid massive array alloc
+                        byte[] zeros = new byte[Math.Min(remainingHeader, 65536)];
+                        while (remainingHeader > 0)
+                        {
+                            int toWrite = (int)Math.Min(remainingHeader, zeros.Length);
+                            fsFinal.Write(zeros, 0, toWrite);
+                            remainingHeader -= toWrite;
+                        }
                     }
                 }
             }
             finally
             {
-                if (File.Exists(tempPath)) File.Delete(tempPath);
-            }
-        }
-
-        private void WriteDirectory(BinaryWriter bw, List<PackageEntry> entries)
-        {
-            bw.Write(entries.Count);
-            foreach (var entry in entries)
-            {
-                byte[] pathBytes = Encoding.UTF8.GetBytes(entry.Path);
-                bw.Write(pathBytes.Length);
-                bw.Write(pathBytes);
-                bw.Write(entry.Offset);
-                bw.Write(entry.OriginalSize);
-
-                // Write Chunk Table for this file
-                bw.Write(entry.ChunkSizes.Count);
-                foreach (int size in entry.ChunkSizes)
-                {
-                    bw.Write(size);
-                }
+                if (pInput != null) NativeMemory.Free(pInput);
+                if (pOutput != null) NativeMemory.Free(pOutput);
             }
         }
 
@@ -444,36 +313,50 @@ namespace GDeflate.Core
 
             // 1. Read Header
             byte[] magic = br.ReadBytes(4);
-            if (Encoding.ASCII.GetString(magic) != "GPCK")
+            if (Encoding.ASCII.GetString(magic) != MagicSignature)
                 throw new InvalidDataException("Invalid Game Package file signature.");
 
             int version = br.ReadInt32();
             if (version != CurrentVersion)
-                throw new InvalidDataException($"Unsupported GPCK version: {version}. Expected Version {CurrentVersion}.");
+                throw new InvalidDataException($"Unsupported GPCK version: {version}. Expected {CurrentVersion}.");
 
-            long directoryOffset = br.ReadInt64();
-
-            // 2. Jump to Directory
-            fs.Position = directoryOffset;
             int fileCount = br.ReadInt32();
+            long dataStartOffset = br.ReadInt64();
 
-            var entries = new List<PackageEntry>();
-            for(int i=0; i<fileCount; i++)
+            // Temporary list to hold directory info before we start extraction
+            // Tuple<Entry, List<int>> maps the file metadata to its specific list of chunk sizes
+            var extractionList = new List<(PackageEntry Entry, List<int> ChunkSizes)>(fileCount);
+
+            // 2. Read Directory
+            for (int i = 0; i < fileCount; i++)
             {
                 int pathLen = br.ReadInt32();
                 byte[] pathBytes = br.ReadBytes(pathLen);
                 string path = Encoding.UTF8.GetString(pathBytes);
                 long offset = br.ReadInt64();
                 long origSize = br.ReadInt64();
+                long compSize = br.ReadInt64();
 
                 int chunkCount = br.ReadInt32();
+
+                // Security: Zip Slip protection
+                if (path.Contains("..") || Path.IsPathRooted(path))
+                    throw new System.Security.SecurityException($"Malicious path detected: {path}");
+
                 var chunkSizes = new List<int>(chunkCount);
-                for(int c=0; c<chunkCount; c++)
+                for (int c = 0; c < chunkCount; c++)
                 {
                     chunkSizes.Add(br.ReadInt32());
                 }
 
-                entries.Add(new PackageEntry { Path = path, Offset = offset, OriginalSize = origSize, ChunkSizes = chunkSizes });
+                var entry = new PackageEntry
+                {
+                    Path = path,
+                    Offset = offset,
+                    OriginalSize = origSize
+                };
+
+                extractionList.Add((entry, chunkSizes));
             }
 
             // 3. Extract Files
@@ -484,10 +367,22 @@ namespace GDeflate.Core
             try
             {
                 int current = 0;
-                foreach(var entry in entries)
+                // Iterate through the prepared list
+                foreach(var item in extractionList)
                 {
+                    var entry = item.Entry;
+                    var chunkSizes = item.ChunkSizes;
+
                     token.ThrowIfCancellationRequested();
-                    string fullPath = Path.Combine(outputDirectory, entry.Path);
+
+                    // Normalize path separators to OS default
+                    string localPath = entry.Path.Replace('/', Path.DirectorySeparatorChar);
+                    string fullPath = Path.Combine(outputDirectory, localPath);
+
+                    // Final Security check
+                    if (!Path.GetFullPath(fullPath).StartsWith(Path.GetFullPath(outputDirectory), StringComparison.Ordinal))
+                        throw new System.Security.SecurityException($"Path traversal attempt: {entry.Path}");
+
                     Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
 
                     if (entry.OriginalSize == 0)
@@ -501,22 +396,17 @@ namespace GDeflate.Core
 
                         long remainingSize = entry.OriginalSize;
 
-                        foreach(int cSize in entry.ChunkSizes)
+                        foreach (int cSize in chunkSizes)
                         {
-                            // Calculate Uncompressed Size for this chunk
-                            // Usually 64KB, unless it's the last one.
                             int uSize = (int)Math.Min(ChunkSize, remainingSize);
 
-                            // Read Raw Compressed Data (No Inline Headers)
                             var inputSpan = new Span<byte>(pInput, cSize);
                             int dRead = fs.Read(inputSpan);
                             if (dRead != cSize) throw new EndOfStreamException($"Unexpected end of stream in {entry.Path}");
 
-                            // Decompress
                             bool success = GDeflateCpuApi.Decompress(pOutput, (ulong)uSize, pInput, (ulong)cSize, 1);
                             if (!success) throw new Exception($"Decompression failed in {entry.Path}");
 
-                            // Write
                             var outputSpan = new ReadOnlySpan<byte>(pOutput, uSize);
                             fsOut.Write(outputSpan);
 

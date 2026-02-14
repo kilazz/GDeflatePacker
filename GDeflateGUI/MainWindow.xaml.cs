@@ -22,12 +22,6 @@ namespace GDeflateGUI
         {
             InitializeComponent();
 
-            // Inject format options programmatically since XAML is static
-            ComboFormat.Items.Clear();
-            ComboFormat.Items.Add(new ComboBoxItem { Content = "Single File (.gdef)" });
-            ComboFormat.Items.Add(new ComboBoxItem { Content = "Game Package (.gpck)" });
-            ComboFormat.SelectedIndex = 1; // Default to Package
-
             _files = new ObservableCollection<FileItem>();
             FileList.ItemsSource = _files;
             _processor = new GDeflateProcessor();
@@ -76,7 +70,6 @@ namespace GDeflateGUI
         private void BtnClear_Click(object sender, RoutedEventArgs e)
         {
             _files.Clear();
-            ComboFormat.SelectedIndex = 1;
             UpdateStatus("List cleared.");
         }
 
@@ -96,26 +89,9 @@ namespace GDeflateGUI
                 return;
             }
 
-            int mode = ComboFormat.SelectedIndex;
-            bool isGpck = mode == 1;
-            string ext = isGpck ? ".gpck" : ".gdef";
-
-            string filter = "All files (*.*)|*.*";
-            if (isGpck) filter = "Game Package (*.gpck)|*.gpck";
-            else filter = "GDeflate File (*.gdef)|*.gdef";
-
-            // Auto-switch to package mode if multiple files and single mode is selected
-            if (!isGpck && _files.Count > 1)
-            {
-                if (MessageBox.Show("Switch to Game Package (.gpck) for multiple files?", "Format Mismatch", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
-                {
-                    ComboFormat.SelectedIndex = 1; // Index 1 is now GPCK
-                    isGpck = true;
-                    ext = ".gpck";
-                    filter = "Game Package (*.gpck)|*.gpck";
-                }
-                else return;
-            }
+            // Always force .gpck
+            string ext = ".gpck";
+            string filter = "Game Package (*.gpck)|*.gpck";
 
             string defaultName = _files.Count == 1 ? Path.GetFileName(_files[0].FilePath) + ext : "assets" + ext;
             var saveDialog = new SaveFileDialog { Filter = filter, FileName = defaultName };
@@ -124,8 +100,9 @@ namespace GDeflateGUI
             {
                 await RunOperationAsync(async (token, progress) =>
                 {
+                    // Map generation logic
                     var fileMap = _files.DistinctBy(x => x.FilePath).ToDictionary(x => x.FilePath, x => x.RelativePath);
-                    await Task.Run(() => _processor.CompressFilesToArchive(fileMap, saveDialog.FileName, ext, progress, token));
+                    await Task.Run(() => _processor.CompressFilesToArchive(fileMap, saveDialog.FileName, progress, token));
                 }, BtnCompress, "Start Compression", "Compressing...", $"Saved to {Path.GetFileName(saveDialog.FileName)}");
             }
         }
@@ -140,7 +117,7 @@ namespace GDeflateGUI
                 return;
             }
 
-            var openDialog = new OpenFileDialog { Multiselect = true, Filter = "GDeflate Archives (*.gdef, *.gpck)|*.gdef;*.gpck", Title = "Select Archives" };
+            var openDialog = new OpenFileDialog { Multiselect = true, Filter = "Game Packages (*.gpck)|*.gpck", Title = "Select Archives" };
 
             if (openDialog.ShowDialog() == true)
             {
@@ -223,8 +200,6 @@ namespace GDeflateGUI
                     _files.Add(new FileItem { FilePath = path, RelativePath = Path.GetFileName(path), Size = FormatSize(new FileInfo(path).Length) });
                 }
             }
-            // Auto switch to GPCK if multiple
-            if (_files.Count > 1 && ComboFormat.SelectedIndex == 0) ComboFormat.SelectedIndex = 1;
             UpdateStatus($"Total files: {_files.Count}");
         }
 
@@ -234,17 +209,18 @@ namespace GDeflateGUI
             UpdateStatus("Scanning folder...");
             try
             {
-                var files = await Task.Run(() => Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories));
-                string root = Path.GetDirectoryName(folderPath) ?? folderPath;
+                // Use the processor's shared logic to get the map, then convert to UI items
+                var fileMap = await Task.Run(() => GDeflateProcessor.BuildFileMap(folderPath));
 
-                foreach (var file in files)
+                foreach (var kvp in fileMap)
                 {
-                    if (!_files.Any(x => x.FilePath == file))
+                    if (!_files.Any(x => x.FilePath == kvp.Key))
                     {
-                        _files.Add(new FileItem { FilePath = file, RelativePath = Path.GetRelativePath(root, file), Size = FormatSize(new FileInfo(file).Length) });
+                        // Note: kvp.Value uses forward slashes now, Windows UI might prefer backslashes for display
+                        string displayRelPath = kvp.Value.Replace('/', Path.DirectorySeparatorChar);
+                        _files.Add(new FileItem { FilePath = kvp.Key, RelativePath = displayRelPath, Size = FormatSize(new FileInfo(kvp.Key).Length) });
                     }
                 }
-                if (_files.Count > 1 && ComboFormat.SelectedIndex == 0) ComboFormat.SelectedIndex = 1;
                 UpdateStatus($"Total files: {_files.Count}");
             }
             finally { ToggleUI(true); }
@@ -256,7 +232,7 @@ namespace GDeflateGUI
 
         private void ToggleUI(bool enable)
         {
-            BtnAddFiles.IsEnabled = BtnAddFolder.IsEnabled = BtnClear.IsEnabled = ComboFormat.IsEnabled = BtnCompress.IsEnabled = BtnDecompress.IsEnabled = enable;
+            BtnAddFiles.IsEnabled = BtnAddFolder.IsEnabled = BtnClear.IsEnabled = BtnCompress.IsEnabled = BtnDecompress.IsEnabled = enable;
         }
     }
 }

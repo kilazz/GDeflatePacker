@@ -16,8 +16,6 @@ namespace GDeflateCLI
                 return;
             }
 
-            // GDeflateCpuApi.IsAvailable check is not strictly needed for 'info' command if it just reads headers,
-            // but the processor validates it generally. For Info we can skip it if we wanted, but keeping it for consistency.
             if (!GDeflateCpuApi.IsAvailable())
             {
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -79,51 +77,41 @@ namespace GDeflateCLI
             string inputPath = args[1];
             if (!ValidateInput(inputPath)) return;
 
-            // Logic Fix: Check output extension to determine format, regardless of input being a file or folder.
-            bool inputIsFolder = Directory.Exists(inputPath);
-            string outputPath = args.Length > 2 ? args[2] : DeriveOutputPath(inputPath, true);
+            string outputPath = args.Length > 2 ? args[2] : DeriveOutputPath(inputPath);
 
-            bool outputIsGpck = outputPath.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase);
+            // Enforce .gpck extension
+            if (!outputPath.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase))
+            {
+                outputPath += ".gpck";
+            }
 
             var processor = new GDeflateProcessor();
 
             Console.WriteLine($"Processing: {Path.GetFileName(inputPath)} -> {Path.GetFileName(outputPath)}");
-
-            string modeStr = "Single File (.gdef)";
-            if (outputIsGpck) modeStr = "Game Package (.gpck) [DirectStorage Aligned]";
-            Console.WriteLine($"Mode: {modeStr}");
+            Console.WriteLine("Mode: Game Package (.gpck) [DirectStorage Aligned]");
 
             var sw = Stopwatch.StartNew();
-
             Dictionary<string, string> map;
 
-            if (inputIsFolder)
+            if (Directory.Exists(inputPath))
             {
-                map = BuildDirectoryMap(inputPath);
+                // Use the centralized method to avoid logic duplication
+                map = GDeflateProcessor.BuildFileMap(inputPath);
                 if (map.Count == 0)
                 {
                     Console.WriteLine("Folder is empty.");
                     return;
                 }
-
-                // Folders MUST be Packages now.
-                if (!outputIsGpck)
-                {
-                     Console.WriteLine("Info: Folder compression defaults to Game Package (.gpck).");
-                     outputPath = Path.ChangeExtension(outputPath, ".gpck");
-                     outputIsGpck = true;
-                }
             }
             else
             {
-                // Single file
+                // Single file packed into a container
                 map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
             }
 
             Console.WriteLine($"Target files: {map.Count}");
 
-            string format = outputIsGpck ? ".gpck" : ".gdef";
-            processor.CompressFilesToArchive(map, outputPath, format);
+            processor.CompressFilesToArchive(map, outputPath);
 
             sw.Stop();
             PrintSuccess($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
@@ -133,7 +121,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI decompress <archive> [output_path]");
+                Console.WriteLine("Usage: GDeflateCLI decompress <archive.gpck> [output_path]");
                 return;
             }
 
@@ -164,11 +152,8 @@ namespace GDeflateCLI
             }
 
             string inputPath = args[1];
-            if (!File.Exists(inputPath))
-            {
-                Console.WriteLine($"File not found: {inputPath}");
-                return;
-            }
+            // Use ValidateInput instead of manual checks to avoid duplication
+            if (!ValidateInput(inputPath)) return;
 
             Console.WriteLine($"Inspecting: {Path.GetFileName(inputPath)}...");
             var processor = new GDeflateProcessor();
@@ -238,41 +223,25 @@ namespace GDeflateCLI
             return false;
         }
 
-        static string DeriveOutputPath(string input, bool compress)
+        static string DeriveOutputPath(string input)
         {
-            if (compress)
-            {
-                // Default logic: If folder -> gpck, if file -> gdef
-                return Directory.Exists(input) ? input + ".gpck" : input + ".gdef";
-            }
-            return Path.ChangeExtension(input, null);
+            // Always .gpck now
+            return Directory.Exists(input) ? input + ".gpck" : Path.ChangeExtension(input, ".gpck");
         }
 
-        static Dictionary<string, string> BuildDirectoryMap(string dirPath)
-        {
-            var map = new Dictionary<string, string>();
-            string rootDir = Path.GetFullPath(dirPath);
-            if (!rootDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
-                rootDir += Path.DirectorySeparatorChar;
-
-            foreach (var file in Directory.GetFiles(dirPath, "*.*", SearchOption.AllDirectories))
-            {
-                map[file] = Path.GetRelativePath(dirPath, file);
-            }
-            return map;
-        }
+        // Removed BuildDirectoryMap in favor of GDeflateProcessor.BuildFileMap
 
         static void ShowHelp()
         {
             Console.WriteLine("GDeflate CLI Tool (CPU)");
             Console.WriteLine("Usage: GDeflateCLI <command> <input> [output]");
             Console.WriteLine("Commands:");
-            Console.WriteLine("compress (-c) : Compress file or folder");
-            Console.WriteLine("decompress (-d) : Decompress archive");
+            Console.WriteLine("compress (-c) : Compress file or folder into .gpck");
+            Console.WriteLine("decompress (-d) : Decompress .gpck archive");
             Console.WriteLine("info (-i) : Inspect archive structure & alignment");
             Console.WriteLine("Examples:");
+            Console.WriteLine("GDeflateCLI compress texture.png texture.gpck");
             Console.WriteLine("GDeflateCLI compress data/ levels.gpck");
-            Console.WriteLine("GDeflateCLI info levels.gpck");
         }
 
         static void PrintSuccess(string msg)

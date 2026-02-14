@@ -47,12 +47,7 @@ namespace GDeflate.Core
         public static extern ulong CompressBound(ulong size);
 
         // Correct Export Name: GDeflateCompress
-        // Standard Array Overload
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompress")]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static extern bool Compress(byte[] output, ref ulong outputSize, byte[] input, ulong inputSize, uint level, uint flags);
-
-        // Unsafe Pointer Overload
+        // Unsafe Pointer Overload - Used by Processor
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompress")]
         [return: MarshalAs(UnmanagedType.I1)]
         public static unsafe extern bool Compress(
@@ -64,12 +59,7 @@ namespace GDeflate.Core
             uint flags);
 
         // Correct Export Name: GDeflateDecompress
-        // Standard Array Overload
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateDecompress")]
-        [return: MarshalAs(UnmanagedType.I1)]
-        public static extern bool Decompress(byte[] output, ulong outputSize, byte[] input, ulong inputSize, uint numWorkers);
-
-        // Unsafe Pointer Overload
+        // Unsafe Pointer Overload - Used by Processor
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateDecompress")]
         [return: MarshalAs(UnmanagedType.I1)]
         public static unsafe extern bool Decompress(
