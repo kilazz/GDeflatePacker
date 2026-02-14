@@ -17,6 +17,9 @@ GDeflateCLI compress texture.png
 # Compress folder -> assets.gpck (DirectStorage aligned package)
 GDeflateCLI compress "C:\Assets" assets.gpck
 
+# Inspect package alignment (DirectStorage check)
+GDeflateCLI info assets.gpck
+
 # Decompress
 GDeflateCLI decompress assets.gpck "C:\Output"
 ```

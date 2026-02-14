@@ -16,6 +16,8 @@ namespace GDeflateCLI
                 return;
             }
 
+            // GDeflateCpuApi.IsAvailable check is not strictly needed for 'info' command if it just reads headers,
+            // but the processor validates it generally. For Info we can skip it if we wanted, but keeping it for consistency.
             if (!GDeflateCpuApi.IsAvailable())
             {
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -38,6 +40,10 @@ namespace GDeflateCLI
                     case "decompress":
                     case "-d":
                         RunDecompress(args);
+                        break;
+                    case "info":
+                    case "-i":
+                        RunInfo(args);
                         break;
                     case "help":
                     case "--help":
@@ -149,6 +155,76 @@ namespace GDeflateCLI
             PrintSuccess($"Done in {sw.Elapsed.TotalSeconds:F2}s!");
         }
 
+        static void RunInfo(string[] args)
+        {
+            if (args.Length < 2)
+            {
+                Console.WriteLine("Usage: GDeflateCLI info <package.gpck>");
+                return;
+            }
+
+            string inputPath = args[1];
+            if (!File.Exists(inputPath))
+            {
+                Console.WriteLine($"File not found: {inputPath}");
+                return;
+            }
+
+            Console.WriteLine($"Inspecting: {Path.GetFileName(inputPath)}...");
+            var processor = new GDeflateProcessor();
+
+            try
+            {
+                var info = processor.InspectPackage(inputPath);
+
+                if (info.Magic != "GPCK")
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("Warning: File does not have GPCK signature.");
+                    Console.ResetColor();
+                    return;
+                }
+
+                Console.WriteLine($"Version: {info.Version}");
+                Console.WriteLine($"File Count: {info.FileCount}");
+                Console.WriteLine($"Total Size: {info.TotalSize / 1024.0 / 1024.0:F2} MB");
+                Console.WriteLine(new string('-', 60));
+                Console.WriteLine($"{"File",-30} | {"Compressed",-10} | {"Ratio",-8} | {"Aligned(4K)",-10}");
+                Console.WriteLine(new string('-', 60));
+
+                bool allAligned = true;
+
+                foreach (var entry in info.Entries)
+                {
+                    double ratio = entry.OriginalSize > 0 ? (double)entry.CompressedSize / entry.OriginalSize * 100 : 0;
+                    string ratioStr = $"{ratio:F1}%";
+                    string alignedStr = entry.Is4KAligned ? "YES" : "NO";
+                    if (!entry.Is4KAligned) allAligned = false;
+
+                    string shortPath = entry.Path.Length > 28 ? "..." + entry.Path.Substring(entry.Path.Length - 25) : entry.Path;
+                    Console.WriteLine($"{shortPath,-30} | {entry.CompressedSize / 1024.0:F1} KB   | {ratioStr,-8} | {alignedStr,-10}");
+                }
+
+                Console.WriteLine(new string('-', 60));
+                if (allAligned)
+                {
+                     Console.ForegroundColor = ConsoleColor.Green;
+                     Console.WriteLine("SUCCESS: All files are aligned to 4KB (DirectStorage Compatible).");
+                }
+                else
+                {
+                     Console.ForegroundColor = ConsoleColor.Red;
+                     Console.WriteLine("WARNING: Some files are NOT 4KB aligned. DirectStorage IO performance may suffer.");
+                }
+                Console.ResetColor();
+
+            }
+            catch(Exception ex)
+            {
+                PrintError(ex);
+            }
+        }
+
         // --- Helpers ---
 
         static bool ValidateInput(string path)
@@ -188,10 +264,13 @@ namespace GDeflateCLI
         {
             Console.WriteLine("GDeflate CLI Tool (CPU)");
             Console.WriteLine("Usage: GDeflateCLI <command> <input> [output]");
-            Console.WriteLine("Commands: compress (-c), decompress (-d)");
+            Console.WriteLine("Commands:");
+            Console.WriteLine("  compress (-c)   : Compress file or folder");
+            Console.WriteLine("  decompress (-d) : Decompress archive");
+            Console.WriteLine("  info (-i)       : Inspect archive structure & alignment");
             Console.WriteLine("Examples:");
-            Console.WriteLine("compress data/ levels.gpck (Creates game-ready package)");
-            Console.WriteLine("compress texture.dds (Creates texture.dds.gdef)");
+            Console.WriteLine("  GDeflateCLI compress data/ levels.gpck");
+            Console.WriteLine("  GDeflateCLI info levels.gpck");
         }
 
         static void PrintSuccess(string msg)
