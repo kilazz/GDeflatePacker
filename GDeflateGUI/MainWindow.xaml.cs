@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using GDeflate.Core;
 using Microsoft.Win32;
 
@@ -21,12 +22,18 @@ namespace GDeflateGUI
         {
             InitializeComponent();
 
+            // Inject format options programmatically since XAML is static
+            ComboFormat.Items.Clear();
+            ComboFormat.Items.Add(new ComboBoxItem { Content = "Single File (.gdef)" });
+            ComboFormat.Items.Add(new ComboBoxItem { Content = "Game Package (.gpck)" });
+            ComboFormat.SelectedIndex = 1; // Default to Package
+
             _files = new ObservableCollection<FileItem>();
             FileList.ItemsSource = _files;
             _processor = new GDeflateProcessor();
 
             CheckBackend();
-            UpdateStatus($"Ready - Running on WPF (.NET 10) x64");
+            UpdateStatus($"Ready - Running on WPF (.NET 10.0) x64");
         }
 
         private void CheckBackend()
@@ -69,7 +76,7 @@ namespace GDeflateGUI
         private void BtnClear_Click(object sender, RoutedEventArgs e)
         {
             _files.Clear();
-            ComboFormat.SelectedIndex = 0;
+            ComboFormat.SelectedIndex = 1;
             UpdateStatus("List cleared.");
         }
 
@@ -89,21 +96,29 @@ namespace GDeflateGUI
                 return;
             }
 
-            bool isZip = ComboFormat.SelectedIndex == 1;
-            string ext = isZip ? ".zip" : ".gdef";
-            string filter = isZip ? "Zip Archive (*.zip)|*.zip" : "GDeflate File (*.gdef)|*.gdef";
+            int mode = ComboFormat.SelectedIndex;
+            bool isGpck = mode == 1;
+            string ext = isGpck ? ".gpck" : ".gdef";
 
-            // Auto-switch to zip if multiple files
-            if (!isZip && _files.Count > 1)
+            string filter = "All files (*.*)|*.*";
+            if (isGpck) filter = "Game Package (*.gpck)|*.gpck";
+            else filter = "GDeflate File (*.gdef)|*.gdef";
+
+            // Auto-switch to package mode if multiple files and single mode is selected
+            if (!isGpck && _files.Count > 1)
             {
-                if (MessageBox.Show("Switch to Archive (.zip) mode automatically?", "Format Mismatch", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
+                if (MessageBox.Show("Switch to Game Package (.gpck) for multiple files?", "Format Mismatch", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
                 {
-                    ComboFormat.SelectedIndex = 1; isZip = true; ext = ".zip"; filter = "Zip Archive (*.zip)|*.zip";
+                    ComboFormat.SelectedIndex = 1; // Index 1 is now GPCK
+                    isGpck = true;
+                    ext = ".gpck";
+                    filter = "Game Package (*.gpck)|*.gpck";
                 }
                 else return;
             }
 
-            var saveDialog = new SaveFileDialog { Filter = filter, FileName = isZip ? "archive.zip" : Path.GetFileName(_files[0].FilePath) + ".gdef" };
+            string defaultName = _files.Count == 1 ? Path.GetFileName(_files[0].FilePath) + ext : "assets" + ext;
+            var saveDialog = new SaveFileDialog { Filter = filter, FileName = defaultName };
 
             if (saveDialog.ShowDialog() == true)
             {
@@ -125,7 +140,7 @@ namespace GDeflateGUI
                 return;
             }
 
-            var openDialog = new OpenFileDialog { Multiselect = true, Filter = "Archives (*.gdef, *.zip)|*.gdef;*.zip", Title = "Select Archives" };
+            var openDialog = new OpenFileDialog { Multiselect = true, Filter = "GDeflate Archives (*.gdef, *.gpck)|*.gdef;*.gpck", Title = "Select Archives" };
 
             if (openDialog.ShowDialog() == true)
             {
@@ -208,6 +223,7 @@ namespace GDeflateGUI
                     _files.Add(new FileItem { FilePath = path, RelativePath = Path.GetFileName(path), Size = FormatSize(new FileInfo(path).Length) });
                 }
             }
+            // Auto switch to GPCK if multiple
             if (_files.Count > 1 && ComboFormat.SelectedIndex == 0) ComboFormat.SelectedIndex = 1;
             UpdateStatus($"Total files: {_files.Count}");
         }

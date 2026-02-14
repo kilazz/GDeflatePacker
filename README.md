@@ -14,17 +14,17 @@ This project provides efficient tools for compressing and decompressing files us
 # Compress file -> texture.png.gdef
 GDeflateCLI compress texture.png
 
-# Compress folder -> assets.zip
-GDeflateCLI compress "C:\Assets" assets.zip
+# Compress folder -> assets.gpck (DirectStorage aligned package)
+GDeflateCLI compress "C:\Assets" assets.gpck
 
 # Decompress
-GDeflateCLI decompress assets.zip "C:\Output"
+GDeflateCLI decompress assets.gpck "C:\Output"
 ```
 
 ### GUI
 1.  Launch `GDeflateGUI.exe`.
 2.  **Drag & Drop** files or folders.
-3.  Select **.zip** (for folders) or **.gdef** (for single files).
+3.  Select **.gpck** (for folders) or **.gdef** (for single files).
 4.  Click **Start Compression**.
 
 ## 🛠 Build & Requirements

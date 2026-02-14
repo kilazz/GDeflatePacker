@@ -76,12 +76,16 @@ namespace GDeflateCLI
             // Logic Fix: Check output extension to determine format, regardless of input being a file or folder.
             bool inputIsFolder = Directory.Exists(inputPath);
             string outputPath = args.Length > 2 ? args[2] : DeriveOutputPath(inputPath, true);
-            bool outputIsZip = outputPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+
+            bool outputIsGpck = outputPath.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase);
 
             var processor = new GDeflateProcessor();
 
             Console.WriteLine($"Processing: {Path.GetFileName(inputPath)} -> {Path.GetFileName(outputPath)}");
-            Console.WriteLine($"Mode: {(outputIsZip ? "ZIP Archive" : "Single GDeflate File")}");
+
+            string modeStr = "Single File (.gdef)";
+            if (outputIsGpck) modeStr = "Game Package (.gpck) [DirectStorage Aligned]";
+            Console.WriteLine($"Mode: {modeStr}");
 
             var sw = Stopwatch.StartNew();
 
@@ -95,12 +99,13 @@ namespace GDeflateCLI
                     Console.WriteLine("Folder is empty.");
                     return;
                 }
-                // Folders must always be ZIPs
-                if (!outputIsZip)
+
+                // Folders MUST be Packages now.
+                if (!outputIsGpck)
                 {
-                     Console.WriteLine("Warning: Compressing a folder requires .zip output. Adjusting extension.");
-                     outputPath = Path.ChangeExtension(outputPath, ".zip");
-                     outputIsZip = true;
+                     Console.WriteLine("Info: Folder compression defaults to Game Package (.gpck).");
+                     outputPath = Path.ChangeExtension(outputPath, ".gpck");
+                     outputIsGpck = true;
                 }
             }
             else
@@ -111,7 +116,7 @@ namespace GDeflateCLI
 
             Console.WriteLine($"Target files: {map.Count}");
 
-            string format = outputIsZip ? ".zip" : ".gdef";
+            string format = outputIsGpck ? ".gpck" : ".gdef";
             processor.CompressFilesToArchive(map, outputPath, format);
 
             sw.Stop();
@@ -159,8 +164,8 @@ namespace GDeflateCLI
         {
             if (compress)
             {
-                // Default logic: If folder -> zip, if file -> gdef
-                return Directory.Exists(input) ? input + ".zip" : input + ".gdef";
+                // Default logic: If folder -> gpck, if file -> gdef
+                return Directory.Exists(input) ? input + ".gpck" : input + ".gdef";
             }
             return Path.ChangeExtension(input, null);
         }
@@ -184,6 +189,9 @@ namespace GDeflateCLI
             Console.WriteLine("GDeflate CLI Tool (CPU)");
             Console.WriteLine("Usage: GDeflateCLI <command> <input> [output]");
             Console.WriteLine("Commands: compress (-c), decompress (-d)");
+            Console.WriteLine("Examples:");
+            Console.WriteLine("compress data/ levels.gpck (Creates game-ready package)");
+            Console.WriteLine("compress texture.dds (Creates texture.dds.gdef)");
         }
 
         static void PrintSuccess(string msg)
