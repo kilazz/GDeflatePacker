@@ -7,234 +7,56 @@ using System.Threading;
 
 namespace GDeflate.Core
 {
+    /// <summary>
+    /// Standard GDeflate Processor.
+    /// Implements single-pass compression to produce a spec-compliant GDeflate bitstream.
+    /// </summary>
     public class GDeflateProcessor
     {
-        // --- Constants ---
-
-        // 64MB is the "Sweet Spot" for DirectStorage.
-        // Large enough for GPU parallelism, small enough to keep RAM usage low.
-        private const int STREAM_BLOCK_SIZE = 64 * 1024 * 1024;
-
-        // Magic Header for our custom .gdef v2 streaming format
-        // 0xFB04 = ID, 0x0002 = Version 2 (Streaming)
-        private const uint GDEF_MAGIC_V2 = 0x0002FB04;
-
         /// <summary>
-        /// Checks if the native GDeflateCPU.dll library is loaded and available.
+        /// Checks if the native GDeflate.dll library is loaded and available.
         /// </summary>
         public bool IsCpuLibraryAvailable() => GDeflateCpuApi.IsAvailable();
 
-        // --- STREAMING COMPRESSION (O(1) Memory Usage) ---
+        #region Public API
 
-        /// <summary>
-        /// Compresses a single file using chunk-based streaming.
-        /// Memory usage is constant (approx. 70MB) regardless of file size.
-        /// </summary>
-        public unsafe void CompressFileStreaming(string inputFile, string outputFile, IProgress<int>? progress = null, CancellationToken token = default)
-        {
-            if (!IsCpuLibraryAvailable())
-                throw new FileNotFoundException("GDeflateCPU.dll not found.");
-
-            // Open input with SequentialScan for SSD optimization
-            using var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
-            using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            long totalLength = fsIn.Length;
-            long processedBytes = 0;
-
-            // 1. Write File Header
-            // [Magic: 4 bytes] + [OriginalSize: 8 bytes]
-            fsOut.Write(BitConverter.GetBytes(GDEF_MAGIC_V2));
-            fsOut.Write(BitConverter.GetBytes((ulong)totalLength));
-
-            // 2. Allocate Native Memory (Once for the whole operation)
-            // Input buffer: 64 MB
-            nuint inputBufferSize = STREAM_BLOCK_SIZE;
-            // Output buffer: Calculate max bound (usually slightly larger than input)
-            nuint outputBufferSize = (nuint)GDeflateCpuApi.CompressBound(STREAM_BLOCK_SIZE);
-
-            void* pInput = NativeMemory.Alloc(inputBufferSize);
-            void* pOutput = NativeMemory.Alloc(outputBufferSize);
-
-            try
-            {
-                byte[] metadataBuffer = new byte[8]; // To write block sizes
-
-                while (processedBytes < totalLength)
-                {
-                    token.ThrowIfCancellationRequested();
-
-                    // 3. Read Chunk from Disk directly into Native Memory
-                    // We use Span to write directly to the pointer
-                    Span<byte> inputSpan = new Span<byte>(pInput, (int)inputBufferSize);
-                    int bytesRead = fsIn.Read(inputSpan);
-
-                    if (bytesRead == 0) break;
-
-                    // 4. Compress the Chunk
-                    ulong currentOutputSize = outputBufferSize;
-
-                    // Level 12 is standard high compression for GDeflate
-                    bool success = GDeflateCpuApi.Compress(pOutput, ref currentOutputSize, pInput, (ulong)bytesRead, 12, 0);
-
-                    if (!success) throw new Exception("GDeflate compression failed on stream block.");
-
-                    // 5. Write Block Metadata
-                    // Format: [CompressedSize (4 bytes)] + [UncompressedSize (4 bytes)]
-                    // We need UncompressedSize because the last block might be smaller than 64MB.
-                    BitConverter.TryWriteBytes(metadataBuffer, (uint)currentOutputSize);
-                    fsOut.Write(metadataBuffer, 0, 4);
-
-                    BitConverter.TryWriteBytes(metadataBuffer, (uint)bytesRead);
-                    fsOut.Write(metadataBuffer, 4, 4);
-
-                    // 6. Write Compressed Data to Disk
-                    ReadOnlySpan<byte> outputSpan = new ReadOnlySpan<byte>(pOutput, (int)currentOutputSize);
-                    fsOut.Write(outputSpan);
-
-                    // 7. Progress Report
-                    processedBytes += bytesRead;
-                    if (totalLength > 0)
-                    {
-                        progress?.Report((int)((double)processedBytes / totalLength * 100));
-                    }
-                }
-            }
-            finally
-            {
-                // Always free native memory to avoid leaks
-                NativeMemory.Free(pInput);
-                NativeMemory.Free(pOutput);
-            }
-        }
-
-        // --- STREAMING DECOMPRESSION (O(1) Memory Usage) ---
-
-        /// <summary>
-        /// Decompresses a .gdef v2 file using chunk-based streaming.
-        /// </summary>
-        public unsafe void DecompressFileStreaming(string inputFile, string outputFile, IProgress<int>? progress = null, CancellationToken token = default)
-        {
-            if (!IsCpuLibraryAvailable())
-                throw new FileNotFoundException("GDeflateCPU.dll not found.");
-
-            using var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            // 1. Validate Header
-            byte[] headerBuffer = new byte[12];
-            int headerRead = fsIn.Read(headerBuffer, 0, 12);
-            if (headerRead != 12) throw new InvalidDataException("Invalid file header.");
-
-            uint magic = BitConverter.ToUInt32(headerBuffer, 0);
-            if (magic != GDEF_MAGIC_V2)
-                throw new InvalidDataException($"Unknown or incompatible GDeflate format. Expected V2 (0x{GDEF_MAGIC_V2:X}), got 0x{magic:X}.");
-
-            ulong totalOriginalSize = BitConverter.ToUInt64(headerBuffer, 4);
-            long totalWritten = 0;
-
-            // 2. Allocate Native Memory
-            // We need a buffer large enough for the compressed input (max bound)
-            // And a buffer for the uncompressed output (fixed 64MB max)
-            nuint maxBlockSize = STREAM_BLOCK_SIZE;
-            nuint compressedBufferSize = (nuint)GDeflateCpuApi.CompressBound(STREAM_BLOCK_SIZE);
-
-            void* pInput = NativeMemory.Alloc(compressedBufferSize);
-            void* pOutput = NativeMemory.Alloc(maxBlockSize);
-
-            byte[] metaBuffer = new byte[8];
-
-            try
-            {
-                while (fsIn.Position < fsIn.Length)
-                {
-                    token.ThrowIfCancellationRequested();
-
-                    // 3. Read Block Metadata: [CompSize(4)][UncompSize(4)]
-                    int metaRead = fsIn.Read(metaBuffer, 0, 8);
-                    if (metaRead == 0) break; // EOF
-                    if (metaRead != 8) throw new EndOfStreamException("Unexpected end of stream while reading block header.");
-
-                    uint compSize = BitConverter.ToUInt32(metaBuffer, 0);
-                    uint uncompSize = BitConverter.ToUInt32(metaBuffer, 4);
-
-                    // Sanity check to prevent buffer overflows if file is corrupted
-                    if (compSize > compressedBufferSize)
-                        throw new InvalidDataException($"Compressed block size ({compSize}) exceeds buffer limit.");
-                    if (uncompSize > maxBlockSize)
-                        throw new InvalidDataException($"Uncompressed block size ({uncompSize}) exceeds limit.");
-
-                    // 4. Read Compressed Data
-                    Span<byte> inputSpan = new Span<byte>(pInput, (int)compSize);
-                    int bytesRead = fsIn.Read(inputSpan);
-                    if (bytesRead != compSize) throw new EndOfStreamException("Incomplete compressed block data.");
-
-                    // 5. Decompress
-                    bool success = GDeflateCpuApi.Decompress(pOutput, uncompSize, pInput, compSize, (uint)Environment.ProcessorCount);
-                    if (!success) throw new Exception("GDeflate decompression failed (CRC mismatch or corrupt data).");
-
-                    // 6. Write Uncompressed Data
-                    ReadOnlySpan<byte> outputSpan = new ReadOnlySpan<byte>(pOutput, (int)uncompSize);
-                    fsOut.Write(outputSpan);
-
-                    totalWritten += uncompSize;
-                    if (totalOriginalSize > 0)
-                    {
-                        progress?.Report((int)((double)totalWritten / totalOriginalSize * 100));
-                    }
-                }
-            }
-            finally
-            {
-                NativeMemory.Free(pInput);
-                NativeMemory.Free(pOutput);
-            }
-        }
-
-        // --- ARCHIVE HANDLING (Legacy/Zip + New Streaming) ---
-
-        /// <summary>
-        /// Facade method to handle both .gdef (Single Streaming) and .zip (Multiple Files).
-        /// </summary>
-        public void CompressFilesToArchive(IDictionary<string, string> fileMap, string outputArchivePath, string format, IProgress<int>? progress = null, CancellationToken token = default)
+        public void CompressFilesToArchive(IDictionary<string, string> fileMap, string outputPath, string format, IProgress<int>? progress = null, CancellationToken token = default)
         {
             if (format.Equals(".zip", StringComparison.OrdinalIgnoreCase))
             {
-                // ZIP mode currently uses the legacy "Load to RAM" approach because standard ZIP
-                // doesn't support GDeflate chunking natively easily.
-                // For a "Master Level" solution, you would eventually implement a custom container here too.
-                CompressToZipLegacy(fileMap, outputArchivePath, progress, token);
+                CompressZipArchive(fileMap, outputPath, progress, token);
             }
             else if (format.Equals(".gdef", StringComparison.OrdinalIgnoreCase))
             {
-                // Single File Streaming Mode (High Performance)
                 if (fileMap.Count != 1)
-                    throw new ArgumentException("GDEF format only supports single file compression in this version.");
+                    throw new ArgumentException("GDEF format only supports single file compression.");
 
                 foreach (var kvp in fileMap)
                 {
-                    CompressFileStreaming(kvp.Key, outputArchivePath, progress, token);
+                    CompressFileSinglePass(kvp.Key, outputPath, progress, token);
                     return;
                 }
             }
+            else
+            {
+                throw new NotSupportedException($"Format {format} is not supported.");
+            }
         }
 
-        public void DecompressArchive(string inputArchivePath, string outputDirectory, IProgress<int>? progress = null, CancellationToken token = default)
+        public void DecompressArchive(string inputPath, string outputDirectory, IProgress<int>? progress = null, CancellationToken token = default)
         {
-            string ext = Path.GetExtension(inputArchivePath).ToLower();
+            string ext = Path.GetExtension(inputPath).ToLower();
 
             if (ext == ".gdef")
             {
-                // High Performance Streaming Decompression
-                string outputName = Path.GetFileNameWithoutExtension(inputArchivePath);
-                string outputPath = Path.Combine(outputDirectory, outputName);
-                DecompressFileStreaming(inputArchivePath, outputPath, progress, token);
+                string outputName = Path.GetFileNameWithoutExtension(inputPath);
+                string fullOutputPath = Path.Combine(outputDirectory, outputName);
+                DecompressFileSinglePass(inputPath, fullOutputPath, progress, token);
                 progress?.Report(100);
             }
             else if (ext == ".zip")
             {
-                // Legacy ZIP Extraction
-                ExtractZipLegacy(inputArchivePath, outputDirectory, progress, token);
+                ExtractZipArchive(inputPath, outputDirectory, progress, token);
             }
             else
             {
@@ -242,11 +64,176 @@ namespace GDeflate.Core
             }
         }
 
-        // --- LEGACY METHODS (ZIP Support) ---
-        // Kept for compatibility, but marked as legacy compared to the streaming methods above.
+        #endregion
 
-        private unsafe void CompressToZipLegacy(IDictionary<string, string> fileMap, string outputArchivePath, IProgress<int>? progress, CancellationToken token)
+        #region Single Pass GDeflate Operations (Standard Bitstream)
+
+        /// <summary>
+        /// Compresses a file into a raw GDeflate bitstream prefixed with the original 64-bit size.
+        /// The size prefix is required because the GDeflateDecompress API requires the output buffer size to be known.
+        /// </summary>
+        private unsafe void CompressFileSinglePass(string inputFile, string outputFile, IProgress<int>? progress, CancellationToken token)
         {
+            EnsureBackend();
+
+            var fileInfo = new FileInfo(inputFile);
+            ulong inputSize = (ulong)fileInfo.Length;
+
+            // Handle empty files gracefully
+            if (inputSize == 0)
+            {
+                using var fsOutEmpty = new FileStream(outputFile, FileMode.Create, FileAccess.Write);
+                fsOutEmpty.Write(BitConverter.GetBytes((ulong)0));
+                return;
+            }
+
+            // Safety check for UnmanagedMemoryStream capacity (long.MaxValue)
+            if (inputSize > long.MaxValue) throw new NotSupportedException("File is too large for the current implementation (exceeds 9EB).");
+
+            void* pInput = null;
+            void* pOutput = null;
+
+            try
+            {
+                // 1. Prepare Input
+                try
+                {
+                    pInput = NativeMemory.Alloc((nuint)inputSize);
+                }
+                catch (OutOfMemoryException)
+                {
+                    throw new OutOfMemoryException($"Failed to allocate {inputSize / 1024 / 1024} MB for input buffer. System RAM is insufficient.");
+                }
+
+                using (var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024))
+                using (var umsIn = new UnmanagedMemoryStream((byte*)pInput, (long)inputSize, (long)inputSize, FileAccess.Write))
+                {
+                    fsIn.CopyTo(umsIn);
+                }
+
+                token.ThrowIfCancellationRequested();
+
+                // 2. Prepare Output
+                ulong maxOutputSize = GDeflateCpuApi.CompressBound(inputSize);
+
+                try
+                {
+                    pOutput = NativeMemory.Alloc((nuint)maxOutputSize);
+                }
+                catch (OutOfMemoryException)
+                {
+                     throw new OutOfMemoryException($"Failed to allocate {maxOutputSize / 1024 / 1024} MB for output buffer. System RAM is insufficient.");
+                }
+
+                // 3. Compress
+                // Level 12 (High), Flags 0 (None)
+                ulong compressedSize = maxOutputSize;
+                bool success = GDeflateCpuApi.Compress(pOutput, ref compressedSize, pInput, inputSize, 12, 0);
+
+                if (!success)
+                    throw new Exception("GDeflate native compression failed (Internal API Error).");
+
+                // 4. Write to Disk
+                // Format: [OriginalSize (8 bytes)] + [Raw GDeflate Stream]
+                using (var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write))
+                {
+                    fsOut.Write(BitConverter.GetBytes(inputSize));
+
+                    using (var umsOut = new UnmanagedMemoryStream((byte*)pOutput, (long)compressedSize, (long)compressedSize, FileAccess.Read))
+                    {
+                        umsOut.CopyTo(fsOut);
+                    }
+                }
+            }
+            finally
+            {
+                if (pInput != null) NativeMemory.Free(pInput);
+                if (pOutput != null) NativeMemory.Free(pOutput);
+            }
+        }
+
+        private unsafe void DecompressFileSinglePass(string inputFile, string outputFile, IProgress<int>? progress, CancellationToken token)
+        {
+            EnsureBackend();
+
+            using var fsIn = new FileStream(inputFile, FileMode.Open, FileAccess.Read);
+
+            // 1. Read Original Size
+            byte[] sizeBuffer = new byte[8];
+            // FIX: Use ReadExactly to ensure we get all bytes.
+            fsIn.ReadExactly(sizeBuffer);
+
+            ulong originalSize = BitConverter.ToUInt64(sizeBuffer, 0);
+
+            if (originalSize == 0)
+            {
+                File.Create(outputFile).Dispose();
+                return;
+            }
+
+            long compressedPayloadSize = fsIn.Length - 8;
+            if (compressedPayloadSize <= 0) throw new InvalidDataException("Invalid file structure.");
+
+            void* pInput = null;
+            void* pOutput = null;
+
+            try
+            {
+                // 2. Load Compressed Data
+                try
+                {
+                    pInput = NativeMemory.Alloc((nuint)compressedPayloadSize);
+                }
+                catch (OutOfMemoryException)
+                {
+                    throw new OutOfMemoryException($"Not enough RAM to load compressed payload ({compressedPayloadSize / 1024 / 1024} MB).");
+                }
+
+                using (var umsIn = new UnmanagedMemoryStream((byte*)pInput, compressedPayloadSize, compressedPayloadSize, FileAccess.Write))
+                {
+                    fsIn.CopyTo(umsIn);
+                }
+
+                token.ThrowIfCancellationRequested();
+
+                // 3. Prepare Output
+                try
+                {
+                    pOutput = NativeMemory.Alloc((nuint)originalSize);
+                }
+                catch (OutOfMemoryException)
+                {
+                    throw new OutOfMemoryException($"Not enough RAM to allocate output buffer ({originalSize / 1024 / 1024} MB).");
+                }
+
+                // 4. Decompress
+                bool success = GDeflateCpuApi.Decompress(pOutput, originalSize, pInput, (ulong)compressedPayloadSize, (uint)Environment.ProcessorCount);
+
+                if (!success)
+                    throw new Exception("GDeflate native decompression failed. The stream might be corrupt or invalid.");
+
+                // 5. Write Result
+                using (var fsOut = new FileStream(outputFile, FileMode.Create, FileAccess.Write))
+                using (var umsOut = new UnmanagedMemoryStream((byte*)pOutput, (long)originalSize, (long)originalSize, FileAccess.Read))
+                {
+                    umsOut.CopyTo(fsOut);
+                }
+            }
+            finally
+            {
+                if (pInput != null) NativeMemory.Free(pInput);
+                if (pOutput != null) NativeMemory.Free(pOutput);
+            }
+        }
+
+        #endregion
+
+        #region ZIP Archive Operations
+
+        private unsafe void CompressZipArchive(IDictionary<string, string> fileMap, string outputArchivePath, IProgress<int>? progress, CancellationToken token)
+        {
+            EnsureBackend();
+
             using var zipStream = new FileStream(outputArchivePath, FileMode.Create);
             using var archive = new ZipArchive(zipStream, ZipArchiveMode.Create);
 
@@ -258,48 +245,61 @@ namespace GDeflate.Core
                 token.ThrowIfCancellationRequested();
                 string inputFile = kvp.Key;
                 string entryName = kvp.Value;
+                if (!entryName.EndsWith(".gdef")) entryName += ".gdef";
 
                 var fileInfo = new FileInfo(inputFile);
                 ulong inputSize = (ulong)fileInfo.Length;
 
-                if (inputSize == 0) continue;
+                // Create empty entry for empty file
+                if (inputSize == 0)
+                {
+                    var emptyEntry = archive.CreateEntry(entryName, CompressionLevel.NoCompression);
+                    using var s = emptyEntry.Open();
+                    s.Write(BitConverter.GetBytes((ulong)0));
+                    continue;
+                }
 
-                // NOTE: This legacy method loads the whole file to RAM.
-                // For production, this should also be converted to streams,
-                // but ZIP entries are harder to seek.
-                void* inputPtr = NativeMemory.Alloc((nuint)inputSize);
+                void* pInput = null;
+                void* pOutput = null;
+
                 try
                 {
+                    // Allocate Input
+                    try { pInput = NativeMemory.Alloc((nuint)inputSize); }
+                    catch (OutOfMemoryException) { throw new OutOfMemoryException($"Processing {Path.GetFileName(inputFile)} failed: Not enough RAM."); }
+
                     using (var fs = new FileStream(inputFile, FileMode.Open, FileAccess.Read))
-                    using (var ums = new UnmanagedMemoryStream((byte*)inputPtr, (long)inputSize, (long)inputSize, FileAccess.Write))
+                    using (var ums = new UnmanagedMemoryStream((byte*)pInput, (long)inputSize, (long)inputSize, FileAccess.Write))
                     {
                         fs.CopyTo(ums);
                     }
 
                     ulong maxOutputSize = GDeflateCpuApi.CompressBound(inputSize);
-                    void* outputPtr = NativeMemory.Alloc((nuint)maxOutputSize);
 
-                    try
+                    // Allocate Output
+                    try { pOutput = NativeMemory.Alloc((nuint)maxOutputSize); }
+                    catch (OutOfMemoryException) { throw new OutOfMemoryException($"Processing {Path.GetFileName(inputFile)} failed: Not enough RAM for output buffer."); }
+
+                    ulong compressedSize = maxOutputSize;
+                    bool success = GDeflateCpuApi.Compress(pOutput, ref compressedSize, pInput, inputSize, 12, 0);
+                    if (!success) throw new Exception($"Failed to compress {entryName}");
+
+                    var entry = archive.CreateEntry(entryName, CompressionLevel.NoCompression);
+                    using var entryStream = entry.Open();
+
+                    // Write Size Header (8 bytes)
+                    entryStream.Write(BitConverter.GetBytes(inputSize));
+
+                    // Write Continuous Bitstream
+                    using (var ums = new UnmanagedMemoryStream((byte*)pOutput, (long)compressedSize, (long)compressedSize, FileAccess.Read))
                     {
-                        ulong finalOutputSize = maxOutputSize;
-                        bool success = GDeflateCpuApi.Compress(outputPtr, ref finalOutputSize, inputPtr, inputSize, 12, 0);
-                        if (!success) throw new Exception($"Failed to compress {entryName}");
-
-                        if (!entryName.EndsWith(".gdef")) entryName += ".gdef";
-                        var entry = archive.CreateEntry(entryName, CompressionLevel.NoCompression);
-
-                        using var entryStream = entry.Open();
-                        using var ums = new UnmanagedMemoryStream((byte*)outputPtr, (long)finalOutputSize, (long)finalOutputSize, FileAccess.Read);
                         ums.CopyTo(entryStream);
-                    }
-                    finally
-                    {
-                        NativeMemory.Free(outputPtr);
                     }
                 }
                 finally
                 {
-                    NativeMemory.Free(inputPtr);
+                    if (pOutput != null) NativeMemory.Free(pOutput);
+                    if (pInput != null) NativeMemory.Free(pInput);
                 }
 
                 current++;
@@ -307,8 +307,10 @@ namespace GDeflate.Core
             }
         }
 
-        private unsafe void ExtractZipLegacy(string archivePath, string outputDirectory, IProgress<int>? progress, CancellationToken token)
+        private unsafe void ExtractZipArchive(string archivePath, string outputDirectory, IProgress<int>? progress, CancellationToken token)
         {
+            EnsureBackend();
+
             using var archive = ZipFile.OpenRead(archivePath);
             int total = archive.Entries.Count;
             int current = 0;
@@ -317,49 +319,81 @@ namespace GDeflate.Core
             {
                 token.ThrowIfCancellationRequested();
                 string outputPath = Path.Combine(outputDirectory, entry.FullName);
-                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+                string? dir = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
                 if (entry.Name.EndsWith(".gdef", StringComparison.OrdinalIgnoreCase))
                 {
-                    // For legacy ZIPs, we assume the whole entry is one GDeflate block (non-streaming)
-                    long compressedSize = entry.Length;
-                    void* inputPtr = NativeMemory.Alloc((nuint)compressedSize);
+                    using var entryStream = entry.Open();
 
-                    try
+                    // Read Header
+                    byte[] sizeBuffer = new byte[8];
+                    // FIX: Use ReadExactly
+                    try {
+                        entryStream.ReadExactly(sizeBuffer);
+                    } catch (EndOfStreamException) {
+                        throw new InvalidDataException($"Entry {entry.Name} is too small to be valid GDeflate.");
+                    }
+
+                    ulong uncompressedSize = BitConverter.ToUInt64(sizeBuffer, 0);
+
+                    string finalPath = Path.ChangeExtension(outputPath, null);
+                    if (uncompressedSize == 0)
                     {
-                        using (var entryStream = entry.Open())
-                        using (var ums = new UnmanagedMemoryStream((byte*)inputPtr, compressedSize, compressedSize, FileAccess.Write))
-                        {
-                            entryStream.CopyTo(ums);
-                        }
+                        File.Create(finalPath).Dispose();
+                    }
+                    else
+                    {
+                        // Read Payload
+                        long payloadSize = entry.Length - 8;
+                        if(payloadSize < 0) throw new InvalidDataException("Invalid zip entry size.");
 
-                        // Parse standard TileHeader (NOT our v2 streaming header)
-                        var headerSpan = new Span<byte>(inputPtr, sizeof(TileStreamHeader));
-                        var header = TileStreamHeader.ReadFromSpan(headerSpan);
-                        ulong uncompressedSize = header.GetUncompressedSize();
+                        void* pInput = null;
+                        void* pOutput = null;
 
-                        void* outputPtr = NativeMemory.Alloc((nuint)uncompressedSize);
                         try
                         {
-                            bool success = GDeflateCpuApi.Decompress(outputPtr, uncompressedSize, inputPtr, (ulong)compressedSize, (uint)Environment.ProcessorCount);
-                            if (!success) throw new Exception("Decompression failed.");
+                            try { pInput = NativeMemory.Alloc((nuint)payloadSize); }
+                            catch (OutOfMemoryException) { throw new OutOfMemoryException($"Extracting {entry.Name} failed: Not enough RAM."); }
 
-                            string finalPath = Path.ChangeExtension(outputPath, null); // Remove .gdef
-                            using var fs = new FileStream(finalPath, FileMode.Create);
-                            using var ums = new UnmanagedMemoryStream((byte*)outputPtr, (long)uncompressedSize, (long)uncompressedSize, FileAccess.Read);
-                            ums.CopyTo(fs);
+                            using (var umsIn = new UnmanagedMemoryStream((byte*)pInput, payloadSize, payloadSize, FileAccess.Write))
+                            {
+                                entryStream.CopyTo(umsIn);
+                            }
+
+                            try { pOutput = NativeMemory.Alloc((nuint)uncompressedSize); }
+                            catch (OutOfMemoryException) { throw new OutOfMemoryException($"Extracting {entry.Name} failed: Not enough RAM for output."); }
+
+                            bool success = GDeflateCpuApi.Decompress(pOutput, uncompressedSize, pInput, (ulong)payloadSize, (uint)Environment.ProcessorCount);
+                            if (!success) throw new Exception($"Decompression failed for {entry.Name}");
+
+                            using var fsOut = new FileStream(finalPath, FileMode.Create);
+                            using var umsOut = new UnmanagedMemoryStream((byte*)pOutput, (long)uncompressedSize, (long)uncompressedSize, FileAccess.Read);
+                            umsOut.CopyTo(fsOut);
                         }
-                        finally { NativeMemory.Free(outputPtr); }
+                        finally
+                        {
+                            if (pInput != null) NativeMemory.Free(pInput);
+                            if (pOutput != null) NativeMemory.Free(pOutput);
+                        }
                     }
-                    finally { NativeMemory.Free(inputPtr); }
                 }
                 else
                 {
                     entry.ExtractToFile(outputPath, true);
                 }
+
                 current++;
                 progress?.Report((int)((current / (float)total) * 100));
             }
+        }
+
+        #endregion
+
+        private void EnsureBackend()
+        {
+            if (!IsCpuLibraryAvailable())
+                throw new FileNotFoundException("GDeflate.dll not found.");
         }
     }
 }

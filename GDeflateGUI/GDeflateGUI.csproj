@@ -8,7 +8,7 @@
 		<UseWPF>true</UseWPF>
 		<UseWindowsForms>false</UseWindowsForms>
 		<RootNamespace>GDeflateGUI</RootNamespace>
-		<!-- Force 64-bit execution to match GDeflateCPU.dll architecture -->
+		<!-- Force 64-bit execution to match GDeflate.dll architecture -->
 		<PlatformTarget>x64</PlatformTarget>
 	</PropertyGroup>
 	<ItemGroup>

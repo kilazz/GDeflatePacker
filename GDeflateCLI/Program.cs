@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using System.Diagnostics;
 using System.Collections.Generic;
-using GDeflate.Core; // Updated namespace
+using GDeflate.Core;
 
 namespace GDeflateCLI
 {
@@ -10,40 +10,38 @@ namespace GDeflateCLI
     {
         static void Main(string[] args)
         {
-            // 1. Validate arguments
             if (args.Length == 0)
             {
                 ShowHelp();
                 return;
             }
 
-            // 2. Ensure the core CPU library exists
             if (!GDeflateCpuApi.IsAvailable())
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Error: GDeflateCPU.dll not found in the application directory.");
+                Console.WriteLine("Error: GDeflate.dll not found.");
+                Console.WriteLine("Note: The standard Microsoft GDeflate build outputs a static library (.lib).");
+                Console.WriteLine("      You must compile it as a Dynamic Link Library (.dll) for this tool.");
                 Console.ResetColor();
                 return;
             }
 
-            string command = args[0].ToLower();
-
             try
             {
+                string command = args[0].ToLower();
                 switch (command)
                 {
                     case "compress":
                     case "-c":
-                        HandleCompress(args);
+                        RunCompress(args);
                         break;
                     case "decompress":
                     case "-d":
-                        HandleDecompress(args);
+                        RunDecompress(args);
                         break;
                     case "help":
                     case "--help":
                     case "-h":
-                    case "/?":
                         ShowHelp();
                         break;
                     default:
@@ -52,19 +50,19 @@ namespace GDeflateCLI
                         break;
                 }
             }
+            catch (OutOfMemoryException oom)
+            {
+                 Console.ForegroundColor = ConsoleColor.Red;
+                 Console.WriteLine($"\n[Memory Error] {oom.Message}");
+                 Console.ResetColor();
+            }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"\nCritical Error: {ex.Message}");
-                if (ex.InnerException != null)
-                {
-                    Console.WriteLine($"Details: {ex.InnerException.Message}");
-                }
-                Console.ResetColor();
+                PrintError(ex);
             }
         }
 
-        static void HandleCompress(string[] args)
+        static void RunCompress(string[] args)
         {
             if (args.Length < 2)
             {
@@ -73,187 +71,134 @@ namespace GDeflateCLI
             }
 
             string inputPath = args[1];
+            if (!ValidateInput(inputPath)) return;
 
-            // Check if input exists
-            if (!File.Exists(inputPath) && !Directory.Exists(inputPath))
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Error: Input path not found: {inputPath}");
-                Console.ResetColor();
-                return;
-            }
+            // Logic Fix: Check output extension to determine format, regardless of input being a file or folder.
+            bool inputIsFolder = Directory.Exists(inputPath);
+            string outputPath = args.Length > 2 ? args[2] : DeriveOutputPath(inputPath, true);
+            bool outputIsZip = outputPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
 
-            // Determine output path if not provided
-            string outputPath;
-            if (args.Length > 2)
+            var processor = new GDeflateProcessor();
+
+            Console.WriteLine($"Processing: {Path.GetFileName(inputPath)} -> {Path.GetFileName(outputPath)}");
+            Console.WriteLine($"Mode: {(outputIsZip ? "ZIP Archive" : "Single GDeflate File")}");
+
+            var sw = Stopwatch.StartNew();
+
+            Dictionary<string, string> map;
+
+            if (inputIsFolder)
             {
-                outputPath = args[2];
+                map = BuildDirectoryMap(inputPath);
+                if (map.Count == 0)
+                {
+                    Console.WriteLine("Folder is empty.");
+                    return;
+                }
+                // Folders must always be ZIPs
+                if (!outputIsZip)
+                {
+                     Console.WriteLine("Warning: Compressing a folder requires .zip output. Adjusting extension.");
+                     outputPath = Path.ChangeExtension(outputPath, ".zip");
+                     outputIsZip = true;
+                }
             }
             else
             {
-                if (File.Exists(inputPath))
-                {
-                    // Single file: image.png -> image.png.gdef
-                    // We use GetFileName (not WithoutExtension) to preserve the original format
-                    outputPath = inputPath + ".gdef";
-                }
-                else
-                {
-                    // Folder: MyFolder -> MyFolder.zip
-                    outputPath = Path.GetFileName(Path.TrimEndingDirectorySeparator(inputPath)) + ".zip";
-                }
+                // Single file
+                map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
             }
 
-            var processor = new GDeflateProcessor();
-            Stopwatch sw = Stopwatch.StartNew();
+            Console.WriteLine($"Target files: {map.Count}");
 
-            if (File.Exists(inputPath))
-            {
-                Console.WriteLine($"Compressing file: {Path.GetFileName(inputPath)}...");
-                // Single file map
-                var fileMap = new Dictionary<string, string>
-                {
-                    { inputPath, Path.GetFileName(inputPath) }
-                };
-                processor.CompressFilesToArchive(fileMap, outputPath, ".gdef");
-                Console.WriteLine($"Saved to: {outputPath}");
-            }
-            else if (Directory.Exists(inputPath))
-            {
-                Console.WriteLine($"Scanning folder: {inputPath}...");
-                string[] files = Directory.GetFiles(inputPath, "*.*", SearchOption.AllDirectories);
-
-                if (files.Length == 0)
-                {
-                    Console.WriteLine("Folder is empty. Nothing to compress.");
-                    return;
-                }
-
-                Console.WriteLine($"Found {files.Length} files. Creating archive...");
-
-                // Build relative paths map
-                var fileMap = new Dictionary<string, string>();
-                string rootDir = Path.GetFullPath(inputPath);
-
-                // Ensure rootDir ends with separator to avoid partial matches on names
-                if (!rootDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
-                    rootDir += Path.DirectorySeparatorChar;
-
-                foreach (var file in files)
-                {
-                    string fullPath = Path.GetFullPath(file);
-                    // Create relative path for ZIP entry (e.g., SubFolder/Image.png)
-                    string relativePath = Path.GetRelativePath(inputPath, fullPath);
-                    fileMap[fullPath] = relativePath;
-                }
-
-                processor.CompressFilesToArchive(fileMap, outputPath, ".zip");
-                Console.WriteLine($"Archive created: {outputPath}");
-            }
+            string format = outputIsZip ? ".zip" : ".gdef";
+            processor.CompressFilesToArchive(map, outputPath, format);
 
             sw.Stop();
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
-            Console.ResetColor();
+            PrintSuccess($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
         }
 
-        static void HandleDecompress(string[] args)
+        static void RunDecompress(string[] args)
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI decompress <archive/file> [output_path]");
+                Console.WriteLine("Usage: GDeflateCLI decompress <archive> [output_path]");
                 return;
             }
 
             string inputPath = args[1];
+            if (!ValidateInput(inputPath)) return;
 
-            if (!File.Exists(inputPath))
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Error: File not found: {inputPath}");
-                Console.ResetColor();
-                return;
-            }
+            string outputDir = args.Length > 2
+                ? args[2]
+                : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inputPath)) ?? ".", Path.GetFileNameWithoutExtension(inputPath));
 
-            var processor = new GDeflateProcessor();
-            Stopwatch sw = Stopwatch.StartNew();
-            string ext = Path.GetExtension(inputPath).ToLower();
+            if (!Directory.Exists(outputDir)) Directory.CreateDirectory(outputDir);
 
-            if (ext == ".zip")
-            {
-                // ZIP Mode
-                // If output not provided, create a folder with the archive name
-                string outputDir = args.Length > 2
-                    ? args[2]
-                    : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inputPath)) ?? ".", Path.GetFileNameWithoutExtension(inputPath));
+            Console.WriteLine($"Extracting to: {outputDir}");
+            var sw = Stopwatch.StartNew();
 
-                Console.WriteLine($"Extracting archive: {Path.GetFileName(inputPath)}...");
-                processor.DecompressArchive(inputPath, outputDir);
-                Console.WriteLine($"Extracted to: {outputDir}");
-            }
-            else if (ext == ".gdef")
-            {
-                // GDEF Mode (Single file)
-                string outputPath;
-
-                if (args.Length > 2)
-                {
-                    // User provided output path
-                    // If it's a directory, put the file inside it
-                    if (Directory.Exists(args[2]))
-                    {
-                        outputPath = Path.Combine(args[2], Path.GetFileNameWithoutExtension(inputPath));
-                    }
-                    else
-                    {
-                        outputPath = args[2];
-                    }
-                }
-                else
-                {
-                    // Default: Remove .gdef extension
-                    // image.png.gdef -> image.png
-                    outputPath = Path.ChangeExtension(inputPath, null);
-                }
-
-                Console.WriteLine($"Decompressing file: {Path.GetFileName(inputPath)}...");
-                processor.DecompressFile(inputPath, outputPath);
-                Console.WriteLine($"Saved as: {outputPath}");
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"Unknown extension: {ext}");
-                Console.WriteLine("Supported formats: .zip (Archive), .gdef (Single File)");
-                Console.ResetColor();
-                return;
-            }
+            new GDeflateProcessor().DecompressArchive(inputPath, outputDir);
 
             sw.Stop();
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Done in {sw.Elapsed.TotalSeconds:F2}s!");
+            PrintSuccess($"Done in {sw.Elapsed.TotalSeconds:F2}s!");
+        }
+
+        // --- Helpers ---
+
+        static bool ValidateInput(string path)
+        {
+            if (File.Exists(path) || Directory.Exists(path)) return true;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Error: Input path not found: {path}");
             Console.ResetColor();
+            return false;
+        }
+
+        static string DeriveOutputPath(string input, bool compress)
+        {
+            if (compress)
+            {
+                // Default logic: If folder -> zip, if file -> gdef
+                return Directory.Exists(input) ? input + ".zip" : input + ".gdef";
+            }
+            return Path.ChangeExtension(input, null);
+        }
+
+        static Dictionary<string, string> BuildDirectoryMap(string dirPath)
+        {
+            var map = new Dictionary<string, string>();
+            string rootDir = Path.GetFullPath(dirPath);
+            if (!rootDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                rootDir += Path.DirectorySeparatorChar;
+
+            foreach (var file in Directory.GetFiles(dirPath, "*.*", SearchOption.AllDirectories))
+            {
+                map[file] = Path.GetRelativePath(dirPath, file);
+            }
+            return map;
         }
 
         static void ShowHelp()
         {
-            Console.WriteLine("=========================================");
-            Console.WriteLine("  GDeflate CLI Tool (CPU Version)        ");
-            Console.WriteLine("=========================================");
-            Console.WriteLine("Usage:");
-            Console.WriteLine("Compress a file:");
-            Console.WriteLine("GDeflateCLI compress <file> [output.gdef]");
-            Console.WriteLine("");
-            Console.WriteLine("Compress a folder (to ZIP):");
-            Console.WriteLine("GDeflateCLI compress <folder> [output.zip]");
-            Console.WriteLine("");
-            Console.WriteLine("Decompress:");
-            Console.WriteLine("GDeflateCLI decompress <file.gdef|archive.zip> [output_path]");
-            Console.WriteLine("");
-            Console.WriteLine("Examples:");
-            Console.WriteLine("GDeflateCLI compress texture.png");
-            Console.WriteLine("GDeflateCLI compress \"C:\\GameAssets\" assets.zip");
-            Console.WriteLine("GDeflateCLI decompress texture.png.gdef");
+            Console.WriteLine("GDeflate CLI Tool (CPU)");
+            Console.WriteLine("Usage: GDeflateCLI <command> <input> [output]");
+            Console.WriteLine("Commands: compress (-c), decompress (-d)");
+        }
+
+        static void PrintSuccess(string msg)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(msg);
+            Console.ResetColor();
+        }
+
+        static void PrintError(Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"Critical Error: {ex.Message}");
+            if (ex.InnerException != null) Console.WriteLine(ex.InnerException.Message);
+            Console.ResetColor();
         }
     }
 }
