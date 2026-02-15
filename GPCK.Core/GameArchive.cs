@@ -98,15 +98,20 @@ namespace GPCK.Core
             if (!fi.Exists) throw new FileNotFoundException(path);
             _fileLength = fi.Length;
 
+            // Ensure we don't crash on empty/tiny files
+            if (_fileLength < 64) throw new InvalidDataException("File too short");
+
             _mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            
+            // Open FileStream with Read Share to allow MMF to coexist if needed
             _dataFileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
 
             byte* ptr = null;
             _view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
             _basePtr = ptr;
-
-            if (_fileLength < 64) throw new InvalidDataException("File too short");
+            
+            if (_basePtr == null) throw new InvalidOperationException("Failed to acquire memory pointer.");
 
             ReadOnlySpan<byte> magicFn = new ReadOnlySpan<byte>(_basePtr, 4);
             if (!magicFn.SequenceEqual(Encoding.ASCII.GetBytes(Magic)))
@@ -121,12 +126,25 @@ namespace GPCK.Core
             _fileTableOffset = *(long*)(_basePtr + 24);
             _nameTableOffset = *(long*)(_basePtr + 40);
             _dependencyTableOffset = *(long*)(_basePtr + 48);
+            
+            // Validation
+            if (_fileTableOffset < 0 || _fileTableOffset >= _fileLength) throw new InvalidDataException("Invalid File Table Offset");
+            if (_fileCount < 0) throw new InvalidDataException("Invalid File Count");
         }
 
         public FileEntry GetEntryByIndex(int index)
         {
             if (index < 0 || index >= _fileCount) throw new IndexOutOfRangeException();
-            byte* ptr = _basePtr + _fileTableOffset + (index * FileEntrySize);
+            
+            long offset = _fileTableOffset + ((long)index * FileEntrySize);
+            
+            // Safety Check to prevent AccessViolation
+            if (offset < 0 || offset + FileEntrySize > _fileLength)
+            {
+                throw new InvalidDataException($"File Entry {index} is out of file bounds.");
+            }
+
+            byte* ptr = _basePtr + offset;
             return *(FileEntry*)ptr;
         }
 
@@ -134,6 +152,11 @@ namespace GPCK.Core
         {
             var list = new List<DependencyEntry>(_dependencyCount);
             if (_dependencyCount == 0 || _dependencyTableOffset == 0) return list;
+
+            // Safety
+            long size = (long)_dependencyCount * sizeof(DependencyEntry);
+            if (_dependencyTableOffset < 0 || _dependencyTableOffset + size > _fileLength)
+                 throw new InvalidDataException("Dependency Table out of bounds");
 
             DependencyEntry* ptr = (DependencyEntry*)(_basePtr + _dependencyTableOffset);
             for(int i=0; i<_dependencyCount; i++) list.Add(ptr[i]);
@@ -181,17 +204,33 @@ namespace GPCK.Core
             if (_nameTableOffset == 0) return null;
             byte* ptr = _basePtr + _nameTableOffset;
             byte* end = _basePtr + _fileLength;
+            
+            // Simple bound check on start
+            if (ptr < _basePtr || ptr >= end) return null;
+
             for (int i = 0; i < _fileCount; i++)
             {
-                if (ptr >= end) break;
+                if (ptr >= end - 16) break; // Need at least 16 bytes for Guid
+                
+                // Read Guid
                 byte[] guidBytes = new byte[16];
                 Marshal.Copy((IntPtr)ptr, guidBytes, 0, 16);
                 Guid entryGuid = new Guid(guidBytes);
                 ptr += 16;
+                
+                // Read VarInt Length
                 int length = 0;
                 int shift = 0;
                 byte b;
-                do { b = *ptr++; length |= (b & 0x7F) << shift; shift += 7; } while ((b & 0x80) != 0);
+                do { 
+                    if (ptr >= end) return null; 
+                    b = *ptr++; 
+                    length |= (b & 0x7F) << shift; 
+                    shift += 7; 
+                } while ((b & 0x80) != 0);
+
+                if (ptr + length > end) return null;
+
                 if (entryGuid == id) return Encoding.UTF8.GetString(ptr, length);
                 ptr += length;
             }
@@ -255,8 +294,11 @@ namespace GPCK.Core
 
         public void Dispose()
         {
-            _view?.SafeMemoryMappedViewHandle.ReleasePointer();
-            _view?.Dispose();
+            if (_view != null)
+            {
+                _view.SafeMemoryMappedViewHandle.ReleasePointer();
+                _view.Dispose();
+            }
             _mmf?.Dispose();
             _dataFileStream?.Dispose();
         }

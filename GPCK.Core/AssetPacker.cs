@@ -326,7 +326,7 @@ namespace GPCK.Core
             bw.Write(files.Count); 
             bw.Write(0); 
             bw.Write(dependencies.Count); 
-            bw.Write((long)0); 
+            bw.Write((int)0); // FIXED: 4 bytes padding instead of 8 bytes (long)
             
             bw.Write(fileTableOffset);
             bw.Write((long)0); 
@@ -489,7 +489,52 @@ namespace GPCK.Core
         
         public bool IsCpuLibraryAvailable() => GDeflateCodec.IsAvailable();
         public PackageInfo InspectPackage(string p) { using var a = new GameArchive(p); return a.GetPackageInfo(); }
-        public bool VerifyArchive(string p, byte[]? k = null) { return true; }
+        
+        /// <summary>
+        /// Reads every file in the archive to ensure integrity.
+        /// Returns false if decompression fails for any file.
+        /// </summary>
+        public bool VerifyArchive(string p, byte[]? k = null) 
+        {
+            try
+            {
+                using var archive = new GameArchive(p);
+                if (k != null) archive.DecryptionKey = k;
+
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(65536);
+                
+                try
+                {
+                    for (int i = 0; i < archive.FileCount; i++)
+                    {
+                        var entry = archive.GetEntryByIndex(i);
+                        // OpenRead triggers header checks
+                        using var stream = archive.OpenRead(entry);
+                        
+                        // Actually read and decompress the entire stream to verify integrity
+                        long remaining = entry.OriginalSize;
+                        while (remaining > 0)
+                        {
+                            int read = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                            if (read == 0) throw new EndOfStreamException($"Unexpected EOF in file index {i}");
+                            remaining -= read;
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Verification Failed: {ex.Message}");
+                return false;
+            }
+        }
+
         public void ExtractSingleFile(string p, string o, string t, byte[]? k) 
         {
             using var a = new GameArchive(p);
