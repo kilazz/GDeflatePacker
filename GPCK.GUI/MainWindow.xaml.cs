@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -8,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GPCK.Core;
@@ -26,6 +28,7 @@ namespace GPCKGUI
     public partial class MainWindow : Window
     {
         private ObservableCollection<FileItem> _files = new ObservableCollection<FileItem>();
+        private ICollectionView _fileView;
         private ObservableCollection<BlockItem> _blocks = new ObservableCollection<BlockItem>();
         private AssetPacker _processor;
         private CancellationTokenSource? _cts;
@@ -36,11 +39,46 @@ namespace GPCKGUI
             InitializeComponent();
             _files = new ObservableCollection<FileItem>();
             _blocks = new ObservableCollection<BlockItem>();
-            FileList.ItemsSource = _files;
+            
+            // Setup Filtering View
+            _fileView = CollectionViewSource.GetDefaultView(_files);
+            _fileView.Filter = FileFilter;
+            FileList.ItemsSource = _fileView;
+            
             VisualizerItems.ItemsSource = _blocks;
             _processor = new AssetPacker();
             CheckBackend();
             UpdateStatus($"Ready");
+        }
+
+        private bool FileFilter(object item)
+        {
+            if (string.IsNullOrWhiteSpace(TxtSearch.Text)) return true;
+            if (item is FileItem f)
+            {
+                return f.RelativePath.Contains(TxtSearch.Text, StringComparison.OrdinalIgnoreCase) ||
+                       f.AssetId.ToString().Contains(TxtSearch.Text, StringComparison.OrdinalIgnoreCase);
+            }
+            return false;
+        }
+
+        private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            _fileView.Refresh();
+            UpdateListCount();
+        }
+
+        private void UpdateListCount()
+        {
+            // Update visual counter based on filtered view
+            int count = 0;
+            foreach(var item in _fileView) count++;
+            
+            int total = _files.Count;
+            if (count != total)
+                TxtListCount.Text = $"{count} / {total} items";
+            else
+                TxtListCount.Text = $"{total} items";
         }
 
         protected override void OnClosed(EventArgs e)
@@ -52,7 +90,6 @@ namespace GPCKGUI
         private void CheckBackend()
         {
             var g = _processor.IsCpuLibraryAvailable();
-            // Zstd check omitted as it is now integrated into Core logic more deeply
             TxtBackendStatus.Text = $"GDeflate:{(g?"✓":"❌")}";
         }
 
@@ -109,6 +146,7 @@ namespace GPCKGUI
                     }
                 }
                 UpdateStatus($"Loaded {info.FileCount} assets from {Path.GetFileName(path)}");
+                UpdateListCount();
             }
             catch (Exception ex)
             {
@@ -233,6 +271,7 @@ namespace GPCKGUI
             foreach (var a in _openArchives) a.Dispose();
             _openArchives.Clear();
             ResetPreview();
+            UpdateListCount();
         }
 
         private async void BtnCompress_Click(object sender, RoutedEventArgs e)
@@ -258,7 +297,11 @@ namespace GPCKGUI
         private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
         {
              if (_cts != null) { _cts.Cancel(); return; }
-             var items = FileList.SelectedItems.Count > 0 ? FileList.SelectedItems.Cast<FileItem>().ToList() : _files.ToList();
+             // IMPORTANT: Extract filtered items if filter is active
+             var items = FileList.SelectedItems.Count > 0 
+                ? FileList.SelectedItems.Cast<FileItem>().ToList() 
+                : _fileView.Cast<FileItem>().ToList();
+             
              var dialog = new OpenFolderDialog();
              if (dialog.ShowDialog() == true)
              {
@@ -266,8 +309,6 @@ namespace GPCKGUI
                  {
                      await Task.Run(() => {
                          int i=0;
-                         // Using multithreaded extraction would be faster but for simplicity in UI thread handling we do sequential here or use Packer logic
-                         // Let's use Packer's Decompress logic if extracting ALL, but here we might have specific items.
                          foreach(var item in items)
                          {
                              token.ThrowIfCancellationRequested();
@@ -309,14 +350,19 @@ namespace GPCKGUI
                  if (File.Exists(p)) _files.Add(new FileItem { FilePath = p, RelativePath = Path.GetFileName(p), AssetId = AssetIdGenerator.Generate(Path.GetFileName(p)), Size = FormatSize(new FileInfo(p).Length)});
                  else if (Directory.Exists(p)) _ = AddFolderAsync(p);
              }
+             UpdateListCount();
         }
 
         private async Task AddFolderAsync(string f)
         {
             var map = await Task.Run(() => AssetPacker.BuildFileMap(f));
-            foreach(var kv in map)
-                if (!_files.Any(x=>x.FilePath == kv.Key))
-                    _files.Add(new FileItem { FilePath = kv.Key, RelativePath = kv.Value, AssetId = AssetIdGenerator.Generate(kv.Value), Size = FormatSize(new FileInfo(kv.Key).Length)});
+            // Dispatch to UI thread
+            Application.Current.Dispatcher.Invoke(() => {
+                foreach(var kv in map)
+                    if (!_files.Any(x=>x.FilePath == kv.Key))
+                        _files.Add(new FileItem { FilePath = kv.Key, RelativePath = kv.Value, AssetId = AssetIdGenerator.Generate(kv.Value), Size = FormatSize(new FileInfo(kv.Key).Length)});
+                UpdateListCount();
+            });
         }
 
         private string FormatSize(long b) => b < 1024 ? $"{b} B" : $"{b/1024.0:F2} KB";
