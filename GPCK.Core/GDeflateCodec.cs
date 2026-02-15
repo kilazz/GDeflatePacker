@@ -5,13 +5,13 @@ using System.Runtime.InteropServices;
 
 namespace GDeflate.Core
 {
-    public static class GDeflateCpuApi
+    public static class GDeflateCodec
     {
         private const string DllName = "GDeflate.dll";
 
-        static GDeflateCpuApi()
+        static GDeflateCodec()
         {
-            NativeLibrary.SetDllImportResolver(typeof(GDeflateCpuApi).Assembly, CustomDllResolver);
+            NativeLibrary.SetDllImportResolver(typeof(GDeflateCodec).Assembly, CustomDllResolver);
         }
 
         private static IntPtr CustomDllResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
@@ -39,15 +39,12 @@ namespace GDeflate.Core
 
         public static bool IsAvailable()
         {
-            return NativeLibrary.TryLoad(DllName, typeof(GDeflateCpuApi).Assembly, null, out IntPtr handle) && handle != IntPtr.Zero;
+            return NativeLibrary.TryLoad(DllName, typeof(GDeflateCodec).Assembly, null, out IntPtr handle) && handle != IntPtr.Zero;
         }
 
-        // Correct Export Name: GDeflateCompressBound
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompressBound")]
         public static extern ulong CompressBound(ulong size);
 
-        // Correct Export Name: GDeflateCompress
-        // Unsafe Pointer Overload - Used by Processor
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompress")]
         [return: MarshalAs(UnmanagedType.I1)]
         public static unsafe extern bool Compress(
@@ -58,8 +55,6 @@ namespace GDeflate.Core
             uint level,
             uint flags);
 
-        // Correct Export Name: GDeflateDecompress
-        // Unsafe Pointer Overload - Used by Processor
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateDecompress")]
         [return: MarshalAs(UnmanagedType.I1)]
         public static unsafe extern bool Decompress(

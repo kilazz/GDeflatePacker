@@ -1,11 +1,11 @@
 # Game Asset Browser
-**GDeflate Compression** built on **.NET 10.0**.
+**Game Package** built on **.NET 10.0**.
 This project provides efficient tools for compressing and decompressing files using Microsoft's [GDeflate](https://github.com/microsoft/DirectStorage/tree/main/GDeflate) algorithm, utilizing direct native memory (`unsafe`) for maximum performance.
 
 ## 🚀 Components
-*   **GDeflate.Core**: Low-level engine handling P/Invoke to `GDeflate.dll`.
-*   **GDeflate CLI**: Command-line tool for automation and batch processing.
-*   **GDeflate GUI**: Modern WPF application with Drag & Drop support and structure preservation.
+*   **GPCK.Core**: Low-level engine handling P/Invoke to `GDeflate.dll`.
+*   **GPCK.CLI**: Command-line tool for automation and batch processing.
+*   **GPCK.GUI**: Modern WPF application with Drag & Drop support and structure preservation.
 
 ## 📦 Usage
 

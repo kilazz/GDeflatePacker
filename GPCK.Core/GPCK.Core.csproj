@@ -3,7 +3,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<RootNamespace>GDeflate.Core</RootNamespace>
+		<RootNamespace>GPCK.Core</RootNamespace>
 		<!-- Required for pointers and NativeMemory -->
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>

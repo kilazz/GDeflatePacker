@@ -8,12 +8,13 @@ using System.Security.Cryptography;
 namespace GDeflate.Core
 {
     /// <summary>
-    /// Game Stream (Hybrid GDeflate/Zstd with Full Streaming support).
+    /// Stream reader for GameArchive assets.
+    /// Supports solid chunks and streaming chunks.
     /// </summary>
-    public class GDeflateStream : Stream
+    public class ArchiveStream : Stream
     {
-        private readonly GDeflateArchive _archive;
-        private readonly GDeflateArchive.FileEntry _entry;
+        private readonly GameArchive _archive;
+        private readonly GameArchive.FileEntry _entry;
         
         private readonly bool _isCompressed;
         private readonly bool _isEncrypted;
@@ -24,7 +25,7 @@ namespace GDeflate.Core
         private byte[]? _buffer; // Used for Solid mode
         
         // Streaming State
-        private GDeflateArchive.ChunkHeaderEntry[]? _chunks;
+        private GameArchive.ChunkHeaderEntry[]? _chunks;
         private byte[]? _currentChunkCache;
         private int _currentChunkIndex = -1;
         private long _chunksDataStartOffset;
@@ -32,16 +33,16 @@ namespace GDeflate.Core
         // Decryption State
         private AesGcm? _aes;
 
-        public GDeflateStream(GDeflateArchive archive, GDeflateArchive.FileEntry entry)
+        public ArchiveStream(GameArchive archive, GameArchive.FileEntry entry)
         {
             _archive = archive;
             _entry = entry;
             _position = 0;
             
-            _isCompressed = (entry.Flags & GDeflateArchive.FLAG_IS_COMPRESSED) != 0;
-            _isEncrypted = (entry.Flags & GDeflateArchive.FLAG_ENCRYPTED) != 0;
-            _isStreaming = (entry.Flags & GDeflateArchive.FLAG_STREAMING) != 0;
-            _method = entry.Flags & GDeflateArchive.MASK_METHOD;
+            _isCompressed = (entry.Flags & GameArchive.FLAG_IS_COMPRESSED) != 0;
+            _isEncrypted = (entry.Flags & GameArchive.FLAG_ENCRYPTED) != 0;
+            _isStreaming = (entry.Flags & GameArchive.FLAG_STREAMING) != 0;
+            _method = entry.Flags & GameArchive.MASK_METHOD;
 
             if (_isEncrypted)
             {
@@ -49,7 +50,7 @@ namespace GDeflate.Core
                 _aes = new AesGcm(_archive.DecryptionKey, 16);
             }
 
-            if (_isStreaming && _method == GDeflateArchive.METHOD_ZSTD)
+            if (_isStreaming && _method == GameArchive.METHOD_ZSTD)
             {
                 LoadChunkTable();
             }
@@ -66,7 +67,7 @@ namespace GDeflate.Core
             byte[] tableData = new byte[tableSize];
             RandomAccess.Read(_archive.GetFileHandle(), tableData, _entry.DataOffset + 4);
 
-            _chunks = new GDeflateArchive.ChunkHeaderEntry[blockCount];
+            _chunks = new GameArchive.ChunkHeaderEntry[blockCount];
             for (int i = 0; i < blockCount; i++)
             {
                 _chunks[i].CompressedSize = BitConverter.ToUInt32(tableData, i * 8);
@@ -88,7 +89,7 @@ namespace GDeflate.Core
         {
             if (_position >= Length) return 0;
             
-            if (_isStreaming && _method == GDeflateArchive.METHOD_ZSTD && _chunks != null)
+            if (_isStreaming && _method == GameArchive.METHOD_ZSTD && _chunks != null)
             {
                 return ReadStreaming(buffer);
             }
@@ -116,20 +117,15 @@ namespace GDeflate.Core
                 int chunkIdx = 0;
                 long pos = 0;
                 
-                // Optimized: We assume fixed size chunks mostly, but table allows variable. 
-                // A linear scan is fine for prototype. For AAA, use O(1) math if fixed size.
-                // Since we write 64KB fixed blocks (except last), we can guess.
                 long p = _position;
                 if (_chunks![0].OriginalSize == 65536)
                 {
                     chunkIdx = (int)(p / 65536);
                     pos = chunkIdx * 65536;
-                    // Verify last chunk boundary
                     if (chunkIdx >= _chunks.Length) chunkIdx = _chunks.Length - 1; 
                 }
                 else
                 {
-                    // Variable size fallback
                     for (int i = 0; i < _chunks.Length; i++)
                     {
                         if (p < pos + _chunks[i].OriginalSize)
@@ -148,7 +144,7 @@ namespace GDeflate.Core
                 }
 
                 // 3. Copy from chunk
-                int offsetInChunk = (int)(_position - pos); // pos is start of this chunk
+                int offsetInChunk = (int)(_position - pos); 
                 int availableInChunk = _currentChunkCache!.Length - offsetInChunk;
                 int toCopy = Math.Min(buffer.Length - totalRead, availableInChunk);
                 
@@ -162,7 +158,6 @@ namespace GDeflate.Core
 
         private void LoadChunk(int index)
         {
-            // Calculate file offset for this chunk
             long fileOffset = _chunksDataStartOffset;
             for(int i=0; i<index; i++) fileOffset += _chunks![i].CompressedSize;
 
@@ -190,8 +185,8 @@ namespace GDeflate.Core
             byte[] decompressed = new byte[oSize];
             unsafe {
                 fixed(byte* pIn = raw) fixed(byte* pOut = decompressed) {
-                     ulong res = ZstdCpuApi.ZSTD_decompress((IntPtr)pOut, oSize, (IntPtr)pIn, (ulong)raw.Length);
-                     if (ZstdCpuApi.ZSTD_isError(res) != 0) throw new IOException($"Streaming Decomp Error Chunk {index}");
+                     ulong res = ZstdCodec.ZSTD_decompress((IntPtr)pOut, oSize, (IntPtr)pIn, (ulong)raw.Length);
+                     if (ZstdCodec.ZSTD_isError(res) != 0) throw new IOException($"Streaming Decomp Error Chunk {index}");
                 }
             }
             _currentChunkCache = decompressed;
@@ -220,21 +215,21 @@ namespace GDeflate.Core
 
             if (_isCompressed)
             {
-                if (_method == GDeflateArchive.METHOD_GDEFLATE)
+                if (_method == GameArchive.METHOD_GDEFLATE)
                 {
                     unsafe {
                         fixed(byte* pIn = processData) fixed(byte* pOut = output) {
-                            if (!GDeflateCpuApi.Decompress((void*)pOut, (ulong)output.Length, pIn, (ulong)processData.Length, 1))
+                            if (!GDeflateCodec.Decompress((void*)pOut, (ulong)output.Length, pIn, (ulong)processData.Length, 1))
                                 throw new IOException("GDeflate Decompression Failed");
                         }
                     }
                 }
-                else if (_method == GDeflateArchive.METHOD_ZSTD)
+                else if (_method == GameArchive.METHOD_ZSTD)
                 {
                     unsafe {
                         fixed(byte* pIn = processData) fixed(byte* pOut = output) {
-                            ulong res = ZstdCpuApi.ZSTD_decompress((IntPtr)pOut, (ulong)output.Length, (IntPtr)pIn, (ulong)processData.Length);
-                            if (ZstdCpuApi.ZSTD_isError(res) != 0)
+                            ulong res = ZstdCodec.ZSTD_decompress((IntPtr)pOut, (ulong)output.Length, (IntPtr)pIn, (ulong)processData.Length);
+                            if (ZstdCodec.ZSTD_isError(res) != 0)
                                 throw new IOException("Zstd Decompression Failed");
                         }
                     }

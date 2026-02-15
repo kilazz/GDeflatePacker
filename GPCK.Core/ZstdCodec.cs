@@ -7,7 +7,7 @@ namespace GDeflate.Core
     /// Native wrapper for Zstandard (libzstd.dll).
     /// Used for high-ratio CPU compression of non-GPU assets (Scripts, JSON, Physics).
     /// </summary>
-    public static class ZstdCpuApi
+    public static class ZstdCodec
     {
         private const string DllName = "libzstd.dll";
 

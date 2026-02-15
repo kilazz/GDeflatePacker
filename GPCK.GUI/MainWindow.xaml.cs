@@ -17,16 +17,16 @@ namespace GDeflateGUI
     public partial class MainWindow : Window
     {
         private ObservableCollection<FileItem> _files = new ObservableCollection<FileItem>();
-        private GDeflateProcessor _processor;
+        private AssetPacker _processor;
         private CancellationTokenSource? _cts;
-        private List<GDeflateArchive> _openArchives = new List<GDeflateArchive>();
+        private List<GameArchive> _openArchives = new List<GameArchive>();
 
         public MainWindow()
         {
             InitializeComponent();
             _files = new ObservableCollection<FileItem>();
             FileList.ItemsSource = _files;
-            _processor = new GDeflateProcessor();
+            _processor = new AssetPacker();
             CheckBackend();
             UpdateStatus($"Ready");
         }
@@ -40,7 +40,7 @@ namespace GDeflateGUI
         private void CheckBackend()
         {
             var g = _processor.IsCpuLibraryAvailable();
-            var z = ZstdCpuApi.IsAvailable();
+            var z = ZstdCodec.IsAvailable();
             TxtBackendStatus.Text = $"GDeflate:{(g?"✓":"❌")} | Zstd:{(z?"✓":"❌")}";
         }
 
@@ -54,7 +54,7 @@ namespace GDeflateGUI
         {
             try
             {
-                var archive = new GDeflateArchive(path);
+                var archive = new GameArchive(path);
                 _openArchives.Add(archive);
                 var info = archive.GetPackageInfo();
                 
@@ -222,7 +222,6 @@ namespace GDeflateGUI
 
         private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
         {
-            // Simplified Extraction logic for brevity, uses AssetID mapping internally
              if (_cts != null) { _cts.Cancel(); return; }
              var items = FileList.SelectedItems.Count > 0 ? FileList.SelectedItems.Cast<FileItem>().ToList() : _files.ToList();
              var dialog = new OpenFolderDialog();
@@ -277,7 +276,7 @@ namespace GDeflateGUI
 
         private async Task AddFolderAsync(string f)
         {
-            var map = await Task.Run(() => GDeflateProcessor.BuildFileMap(f));
+            var map = await Task.Run(() => AssetPacker.BuildFileMap(f));
             foreach(var kv in map)
                 if (!_files.Any(x=>x.FilePath == kv.Key))
                     _files.Add(new FileItem { FilePath = kv.Key, RelativePath = kv.Value, AssetId = AssetIdGenerator.Generate(kv.Value), Size = FormatSize(new FileInfo(kv.Key).Length)});

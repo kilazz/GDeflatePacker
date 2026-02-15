@@ -20,7 +20,7 @@ namespace GDeflateCLI
                 return;
             }
 
-            if (!GDeflateCpuApi.IsAvailable())
+            if (!GDeflateCodec.IsAvailable())
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("Error: GDeflate.dll not found.");
@@ -37,7 +37,7 @@ namespace GDeflateCLI
                     case "-c":
                         RunCompress(args);
                         break;
-                    case "patch": // New
+                    case "patch": 
                     case "-delta":
                         RunPatch(args);
                         break;
@@ -130,7 +130,7 @@ namespace GDeflateCLI
 
             if (!outputPath.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase)) outputPath += ".gpck";
 
-            var processor = new GDeflateProcessor();
+            var processor = new AssetPacker();
             Console.WriteLine($"Processing: {Path.GetFileName(inputPath)}");
             Console.WriteLine($"Mode: Full Archive");
             Console.WriteLine($"Options: Dedup={dedup}, MipSplit={mipSplit}, Level={level}");
@@ -139,7 +139,7 @@ namespace GDeflateCLI
             Dictionary<string, string> map;
 
             if (Directory.Exists(inputPath))
-                map = GDeflateProcessor.BuildFileMap(inputPath);
+                map = AssetPacker.BuildFileMap(inputPath);
             else
                 map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
 
@@ -169,10 +169,9 @@ namespace GDeflateCLI
             Console.WriteLine($"Source Content: {contentPath}");
             
             var sw = Stopwatch.StartNew();
-            var map = GDeflateProcessor.BuildFileMap(contentPath);
+            var map = AssetPacker.BuildFileMap(contentPath);
             
-            var proc = new GDeflateProcessor();
-            // Note: This is an async method in Core, calling via task.run/wait
+            var proc = new AssetPacker();
             proc.CreatePatchArchiveAsync(basePath, map, outPath, 9, null, null, CancellationToken.None).GetAwaiter().GetResult();
             
             sw.Stop();
@@ -203,7 +202,7 @@ namespace GDeflateCLI
 
             Console.WriteLine($"Extracting All to: {outputDir}");
             var sw = Stopwatch.StartNew();
-            new GDeflateProcessor().DecompressArchive(inputPath, outputDir, key);
+            new AssetPacker().DecompressArchive(inputPath, outputDir, key);
             sw.Stop();
             PrintSuccess($"Done in {sw.Elapsed.TotalSeconds:F2}s!");
         }
@@ -233,7 +232,7 @@ namespace GDeflateCLI
             Console.WriteLine($"Extracting '{target}' from {Path.GetFileName(inputPath)}...");
             try 
             {
-                new GDeflateProcessor().ExtractSingleFile(inputPath, outputDir, target, key);
+                new AssetPacker().ExtractSingleFile(inputPath, outputDir, target, key);
                 PrintSuccess($"Extracted successfully.");
             }
             catch(Exception e) { PrintError(e); }
@@ -256,7 +255,7 @@ namespace GDeflateCLI
 
             try 
             {
-                using var archive = new GDeflateArchive(inputPath);
+                using var archive = new GameArchive(inputPath);
                 if (key != null) archive.DecryptionKey = key;
 
                 if (archive.TryGetEntry(target, out var entry))
@@ -292,7 +291,7 @@ namespace GDeflateCLI
 
             Console.WriteLine($"Verifying integrity of: {Path.GetFileName(inputPath)}...");
             var sw = Stopwatch.StartNew();
-            bool valid = new GDeflateProcessor().VerifyArchive(inputPath, key);
+            bool valid = new AssetPacker().VerifyArchive(inputPath, key);
             sw.Stop();
 
             if (valid) PrintSuccess($"Verification Passed ({sw.Elapsed.TotalSeconds:F2}s). Archive is healthy.");
@@ -318,7 +317,7 @@ namespace GDeflateCLI
             Console.WriteLine($"Inspecting: {Path.GetFileName(inputPath)}...");
             try
             {
-                using var archive = new GDeflateArchive(inputPath);
+                using var archive = new GameArchive(inputPath);
                 var info = archive.GetPackageInfo();
                 
                 if (info.Magic != "GPCK") { Console.WriteLine("Invalid File"); return; }
@@ -345,7 +344,6 @@ namespace GDeflateCLI
                         displayName = "..." + displayName.Substring(displayName.Length - 45);
                     }
                     
-                    // Show 4K or 64K alignment info
                     string align = entry.Alignment >= 1024 ? (entry.Alignment/1024) + "K" : entry.Alignment + "B";
 
                     Console.WriteLine($"{displayName,-50} | {entry.OriginalSize / 1024.0:F1}KB | {align,-6} | {entry.Method,-15}");
@@ -379,7 +377,7 @@ namespace GDeflateCLI
             }
 
             Console.WriteLine("Initializing VFS...");
-            using var vfs = new GDeflateVFS();
+            using var vfs = new VirtualFileSystem();
 
             foreach (var arch in archives)
             {

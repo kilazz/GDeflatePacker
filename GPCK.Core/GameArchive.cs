@@ -9,13 +9,14 @@ using Microsoft.Win32.SafeHandles;
 namespace GDeflate.Core
 {
     /// <summary>
-    /// Game Archive.
+    /// Core Game Archive (.gpck).
+    /// Handles the binary structure, headers, and dependency tables.
     /// </summary>
-    public unsafe class GDeflateArchive : IDisposable
+    public unsafe class GameArchive : IDisposable
     {
         public const int Version = 1;
         public const string Magic = "GPCK"; 
-        private const int FileEntrySize = 44; // Explicit size (16+8+4+4+4+4+4)
+        private const int FileEntrySize = 44; 
 
         private readonly MemoryMappedFile _mmf;
         private readonly MemoryMappedViewAccessor _view;
@@ -29,6 +30,8 @@ namespace GDeflate.Core
         private readonly long _fileTableOffset;
         private readonly long _nameTableOffset;
         private readonly long _dependencyTableOffset;
+
+        private Dictionary<Guid, List<DependencyEntry>>? _dependencyLookup;
 
         public string FilePath { get; }
         public int FileCount => _fileCount;
@@ -88,7 +91,7 @@ namespace GDeflate.Core
             return power == 0 ? 4096 : (1u << power);
         }
 
-        public GDeflateArchive(string path)
+        public GameArchive(string path)
         {
             FilePath = path;
             var fi = new FileInfo(path);
@@ -137,6 +140,24 @@ namespace GDeflate.Core
             return list;
         }
 
+        public List<DependencyEntry> GetDependenciesForAsset(Guid assetId)
+        {
+            if (_dependencyLookup == null)
+            {
+                _dependencyLookup = new Dictionary<Guid, List<DependencyEntry>>();
+                var deps = GetDependencies();
+                foreach(var d in deps)
+                {
+                    if (!_dependencyLookup.ContainsKey(d.SourceAssetId))
+                        _dependencyLookup[d.SourceAssetId] = new List<DependencyEntry>();
+                    _dependencyLookup[d.SourceAssetId].Add(d);
+                }
+            }
+
+            if (_dependencyLookup.TryGetValue(assetId, out var list)) return list;
+            return new List<DependencyEntry>();
+        }
+
         public SafeFileHandle GetFileHandle() => _dataFileStream.SafeFileHandle;
 
         public bool TryGetEntry(Guid assetId, out FileEntry entry)
@@ -180,7 +201,7 @@ namespace GDeflate.Core
         public Stream OpenRead(FileEntry entry)
         {
             if (entry.OriginalSize == 0) return new MemoryStream();
-            return new GDeflateStream(this, entry);
+            return new ArchiveStream(this, entry);
         }
 
         public PackageInfo GetPackageInfo()
@@ -211,7 +232,6 @@ namespace GDeflate.Core
                 string meta = "";
                 if ((e.Flags & MASK_TYPE) == TYPE_TEXTURE)
                 {
-                    // Fixed: MetaData1/2 -> Meta1/2 to match struct definition
                     uint w = (e.Meta1 >> 16) & 0xFFFF;
                     uint h = e.Meta1 & 0xFFFF;
                     uint mips = (e.Meta2 >> 8) & 0xFF;

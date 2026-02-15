@@ -16,8 +16,8 @@ namespace GDeflateGUI
 
         // --- Archive Mode (View/Extract) ---
         public bool IsArchiveEntry { get; set; } = false;
-        public GDeflateArchive? SourceArchive { get; set; } 
-        public GDeflateArchive.FileEntry? EntryInfo { get; set; }
+        public GameArchive? SourceArchive { get; set; } 
+        public GameArchive.FileEntry? EntryInfo { get; set; }
         public long CompressedSizeBytes { get; set; }
         public string ManifestInfo { get; set; } = "";
 
@@ -40,11 +40,11 @@ namespace GDeflateGUI
                 if (!IsArchiveEntry || !EntryInfo.HasValue) return "Pending";
                 var e = EntryInfo.Value;
                 
-                uint method = e.Flags & GDeflateArchive.MASK_METHOD;
+                uint method = e.Flags & GameArchive.MASK_METHOD;
                 string m = method switch
                 {
-                    GDeflateArchive.METHOD_GDEFLATE => "GDeflate (GPU)",
-                    GDeflateArchive.METHOD_ZSTD => "Zstd (CPU)",
+                    GameArchive.METHOD_GDEFLATE => "GDeflate (GPU)",
+                    GameArchive.METHOD_ZSTD => "Zstd (CPU)",
                     _ => "Store"
                 };
 

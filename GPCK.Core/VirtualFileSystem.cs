@@ -9,70 +9,57 @@ namespace GDeflate.Core
     /// Virtual File System (VFS).
     /// Allows mounting multiple .gpck archives as layers.
     /// Priority: Last mounted archive overrides files from previous ones.
-    /// Example: Base.gpck (Layer 0) -> Patch01.gpck (Layer 1) -> Mod_4kTextures.gpck (Layer 2)
     /// </summary>
-    public class GDeflateVFS : IDisposable
+    public class VirtualFileSystem : IDisposable
     {
-        private readonly List<GDeflateArchive> _mountedArchives = new();
-
-        // Maps AssetID (GUID) -> Index of the archive in _mountedArchives
+        private readonly List<GameArchive> _mountedArchives = new();
         private readonly Dictionary<Guid, int> _virtualLookup = new();
 
         public int MountedCount => _mountedArchives.Count;
 
-        /// <summary>
-        /// Mounts an archive into the VFS.
-        /// </summary>
-        /// <param name="path">Path to .gpck file</param>
         public void Mount(string path)
         {
-            var archive = new GDeflateArchive(path);
+            var archive = new GameArchive(path);
             _mountedArchives.Add(archive);
             int archiveIndex = _mountedArchives.Count - 1;
 
-            // Register all files from this archive into the virtual lookup table
             for (int i = 0; i < archive.FileCount; i++)
             {
                 var entry = archive.GetEntryByIndex(i);
-
-                // Last Writer Wins (Modding behavior)
-                // If an AssetID already exists, we update the index to point to THIS archive
                 _virtualLookup[entry.AssetId] = archiveIndex;
             }
         }
 
-        /// <summary>
-        /// Checks if a file exists in the virtual file system.
-        /// </summary>
         public bool FileExists(string virtualPath)
         {
             Guid id = AssetIdGenerator.Generate(virtualPath);
             return _virtualLookup.ContainsKey(id);
         }
 
-        /// <summary>
-        /// Opens a file stream from the highest priority archive containing the file.
-        /// </summary>
         public Stream OpenRead(string virtualPath)
         {
             Guid id = AssetIdGenerator.Generate(virtualPath);
 
-            if (_virtualLookup.TryGetValue(id, out int archiveIndex))
+            if (TryGetEntryForId(id, out var archive, out var entry))
             {
-                var archive = _mountedArchives[archiveIndex];
-                // v8 TryGetEntry takes a GUID
-                if (archive.TryGetEntry(id, out var entry))
-                {
-                    return archive.OpenRead(entry);
-                }
+                return archive.OpenRead(entry);
             }
 
             throw new FileNotFoundException($"File not found in VFS: {virtualPath}");
         }
 
-        /// <summary>
-        /// Gets info about which archive is serving the file (Debug/Modding Tool helper).
-        /// </summary>
+        public bool TryGetEntryForId(Guid id, out GameArchive archive, out GameArchive.FileEntry entry)
+        {
+             if (_virtualLookup.TryGetValue(id, out int archiveIndex))
+            {
+                archive = _mountedArchives[archiveIndex];
+                return archive.TryGetEntry(id, out entry);
+            }
+            archive = null;
+            entry = default;
+            return false;
+        }
+
         public string GetSourceArchiveName(string virtualPath)
         {
             Guid id = AssetIdGenerator.Generate(virtualPath);

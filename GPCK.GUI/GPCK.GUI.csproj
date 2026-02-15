@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<!-- Switch to WPF -->
+		<UseWPF>true</UseWPF>
+		<UseWindowsForms>false</UseWindowsForms>
+		<RootNamespace>GPCKGUI</RootNamespace>
+		<!-- Force 64-bit execution to match GDeflate.dll architecture -->
+		<PlatformTarget>x64</PlatformTarget>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj"/>
+	</ItemGroup>
+</Project>
