@@ -140,6 +140,18 @@ namespace GPCK.CLI
 
         public override int Execute(CommandContext context, Settings settings)
         {
+            if (Directory.Exists(settings.Archive))
+            {
+                AnsiConsole.MarkupLine("[bold red]ERROR:[/] Input is a directory. Please provide the path to a .gpck file.");
+                return 1;
+            }
+
+            if (!File.Exists(settings.Archive))
+            {
+                AnsiConsole.MarkupLine($"[bold red]ERROR:[/] File '{settings.Archive}' not found.");
+                return 1;
+            }
+
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
 
             return AnsiConsole.Status()
@@ -216,7 +228,7 @@ namespace GPCK.CLI
 
             await AnsiConsole.Progress().StartAsync(async ctx => {
                 var t = ctx.AddTask("Computing Deltas & Packing...");
-                await packer.CreatePatchArchiveAsync(settings.Base, map, settings.Output, 9, null, null, default);
+                await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, null, default);
                 t.Value = 100;
             });
             return 0;

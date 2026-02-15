@@ -154,7 +154,6 @@ namespace GPCK.Core
             }
 
             byte[] fileBuffer = ArrayPool<byte>.Shared.Rent((int)fileSize);
-            bool processingBufferIsRented = false;
             try {
                 using (var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan | FileOptions.Asynchronous)) {
                     await fs.ReadExactlyAsync(fileBuffer, 0, (int)fileSize, ct).ConfigureAwait(false);
@@ -182,7 +181,6 @@ namespace GPCK.Core
                         m2 = ((uint)h.Value.MipCount << 8);
                         if (mipSplit) {
                             processingBuffer = DdsUtils.ProcessTextureForStreaming(dataSpan.ToArray(), out tailSize);
-                            processingBufferIsRented = false; // DdsUtils returns new array now
                             m2 = (m2 & 0xFF000000) | ((uint)tailSize & 0x00FFFFFF);
                         }
                     }
@@ -222,8 +220,6 @@ namespace GPCK.Core
                 if (tailSize > 0 || ext == ".dds") pf.Flags |= GameArchive.TYPE_TEXTURE;
                 pf.CompressedSize = (uint)(pf.CompressedData?.Length ?? 0);
                 outBag.Add(pf);
-
-                if (processingBufferIsRented && processingBuffer != null) ArrayPool<byte>.Shared.Return(processingBuffer);
             }
             finally { ArrayPool<byte>.Shared.Return(fileBuffer); }
         }
@@ -315,7 +311,6 @@ namespace GPCK.Core
             long nameTableOffset = dependencyTableOffset + dependencyTableSize;
             long nameTableFullSize = files.Sum(f => 16 + Encoding.UTF8.GetByteCount(f.OriginalPath) + 5);
             long dataStart = (nameTableOffset + nameTableFullSize + 4095) & ~4095;
-            long currentOffset = dataStart;
 
             using var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
             using var bw = new BinaryWriter(fs);
@@ -323,15 +318,16 @@ namespace GPCK.Core
             bw.Write(Encoding.ASCII.GetBytes(GameArchive.MagicStr)); bw.Write(GameArchive.Version);
             bw.Write(files.Count); bw.Write(0); bw.Write(dependencies.Count); bw.Write(0);
             bw.Write(fileTableOffset); bw.Write(0L); bw.Write(nameTableOffset); bw.Write(dependencyTableOffset);
-            while(fs.Position < 64) bw.Write((byte)0);
+            while(bw.BaseStream.Position < 64) bw.Write((byte)0);
 
+            long currentOffset = dataStart;
             long[] finalOffsets = new long[files.Count];
             var contentMap = new Dictionary<ulong, long>();
             var filesToWriteIndex = new List<int>();
 
             for(int i=0; i<files.Count; i++) {
                 var f = files[i]; byte[]? sourceData = f.CompressedData ?? f.StreamingData;
-                if (sourceData == null) { finalOffsets[i] = 0; continue; }
+                if (sourceData == null || sourceData.Length == 0) { finalOffsets[i] = 0; continue; }
                 if (enableDedup) {
                     ulong contentHash = XxHash64.Compute(sourceData);
                     if (contentMap.TryGetValue(contentHash, out long existingOffset) && (existingOffset % f.Alignment) == 0) {
@@ -339,11 +335,11 @@ namespace GPCK.Core
                     } else {
                         currentOffset = (currentOffset + (f.Alignment - 1)) & ~(f.Alignment - 1);
                         finalOffsets[i] = currentOffset; contentMap[contentHash] = currentOffset;
-                        filesToWriteIndex.Add(i); currentOffset += f.CompressedSize;
+                        filesToWriteIndex.Add(i); currentOffset += sourceData.Length;
                     }
                 } else {
                     currentOffset = (currentOffset + (f.Alignment - 1)) & ~(f.Alignment - 1);
-                    finalOffsets[i] = currentOffset; filesToWriteIndex.Add(i); currentOffset += f.CompressedSize;
+                    finalOffsets[i] = currentOffset; filesToWriteIndex.Add(i); currentOffset += sourceData.Length;
                 }
             }
 
@@ -362,23 +358,26 @@ namespace GPCK.Core
                 WriteVarInt(bw, nameBytes.Length); bw.Write(nameBytes);
             }
 
-            long bytesToPad = dataStart - fs.Position;
+            // Align to data start
+            long bytesToPad = dataStart - bw.BaseStream.Position;
             if (bytesToPad > 0) {
-                byte[] pad = new byte[Math.Min(bytesToPad, 65536)];
-                while (bytesToPad > 0) { int w = (int)Math.Min(bytesToPad, pad.Length); fs.Write(pad, 0, w); bytesToPad -= w; }
+                byte[] pad = new byte[65536];
+                while (bytesToPad > 0) { int w = (int)Math.Min(bytesToPad, pad.Length); bw.Write(pad, 0, w); bytesToPad -= w; }
             }
 
             int writtenCount = 0;
             foreach(int i in filesToWriteIndex) {
-                var f = files[i]; long padLen = finalOffsets[i] - fs.Position;
+                var f = files[i]; long padLen = finalOffsets[i] - bw.BaseStream.Position;
                 if(padLen > 0) {
-                    byte[] pad = new byte[Math.Min(padLen, 4096)];
-                    while(padLen > 0) { int w=(int)Math.Min(padLen, pad.Length); fs.Write(pad,0,w); padLen-=w; }
+                    byte[] pad = new byte[4096];
+                    while(padLen > 0) { int w=(int)Math.Min(padLen, pad.Length); bw.Write(pad, 0, w); padLen-=w; }
                 }
                 byte[]? sourceData = f.CompressedData ?? f.StreamingData;
-                if (sourceData != null) await fs.WriteAsync(sourceData, 0, sourceData.Length, token).ConfigureAwait(false);
+                if (sourceData != null && sourceData.Length > 0) bw.Write(sourceData);
+
                 writtenCount++; progress?.Report(80 + (int)((writtenCount / (float)filesToWriteIndex.Count) * 20));
             }
+            bw.Flush();
             await fs.FlushAsync(token).ConfigureAwait(false);
         }
 
@@ -405,16 +404,13 @@ namespace GPCK.Core
         public bool VerifyArchive(string p, byte[]? k = null) {
             try {
                 using var archive = new GameArchive(p); if (k != null) archive.DecryptionKey = k;
-                byte[] buffer = new byte[65536];
+                byte[] buffer = new byte[128 * 1024];
                 for (int i = 0; i < archive.FileCount; i++) {
                     using var stream = archive.OpenRead(archive.GetEntryByIndex(i));
                     while (stream.Read(buffer, 0, buffer.Length) > 0) {}
                 }
                 return true;
             } catch { return false; }
-        }
-        public ValueTask CreatePatchArchiveAsync(string baseArch, Dictionary<string,string> map, string outPath, int lvl, byte[]? k, List<DependencyDefinition>? deps, CancellationToken ct) {
-            return CompressFilesToArchiveAsync(map, outPath, true, lvl, k, false, deps, null, ct);
         }
     }
 }
