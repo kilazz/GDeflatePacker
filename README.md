@@ -1,38 +1,35 @@
 # GPCK Toolsuite
-**Game Package** built on **.NET 10.0**.
-This project provides efficient tools for compressing and decompressing files using Microsoft's [GDeflate](https://github.com/microsoft/DirectStorage/tree/main/GDeflate) algorithm, utilizing direct native memory (`unsafe`) for maximum performance.
 
-## 🚀 Components
-*   **GPCK.Core**: Low-level engine handling P/Invoke to `GDeflate.dll`.
-*   **GPCK.CLI**: Command-line tool for automation and batch processing.
-*   **GPCK.GUI**: Modern WPF application with Drag & Drop support and structure preservation.
+**GPCK** is a high-performance asset management system (.NET 10.0) featuring **GDeflate** (DirectStorage) & **Zstd** compression, encryption, deduplication, and Virtual File System (VFS).
 
-## 📦 Usage
+## 🚀 CLI Commands
 
-### CLI
 ```powershell
-# Compress file -> texture.png.gdef
-GPCK compress texture.png
+# Pack / Unpack
+GPCK compress <in_dir> <out.gpck> [--level 9] [--mip-split] [--key <secret>]
+GPCK decompress <in.gpck> <out_dir> [--key <secret>]
 
-# Compress folder -> assets.gpck (DirectStorage aligned package)
-GPCK compress "C:\Assets" assets.gpck
+# Single File / Patching
+GPCK extract-file <in.gpck> <file_path> <out_dir>
+GPCK patch <base.gpck> <new_content_dir> <patch.gpck>
 
-# Inspect package alignment (DirectStorage check)
-GPCK info assets.gpck
-
-# Decompress
-GPCK decompress assets.gpck "C:\Output"
+# Diagnostics
+GPCK info <in.gpck>                # View alignment & compression stats
+GPCK verify <in.gpck>              # CRC32 integrity check
+GPCK mount <a.gpck> <b.gpck> ...   # Test VFS layering
 ```
 
-### GUI
-1.  Launch `GPCK.GUI.exe`.
-2.  **Drag & Drop** files or folders.
-3.  Select **.gpck** (for folders) or **.gdef** (for single files).
-4.  Click **Start Compression**.
+## 🖥️ GUI
 
-## 🛠 Build & Requirements
-*   **Requirements**: Windows x64, .NET 10.0, `GDeflate.dll` (must be in the execution folder).
-*   **Build**:
-    ```bash
-    dotnet build -c Release
-    ```
+The **GPCK.GUI** (WPF) allows for:
+*   Visual inspection of archive structure and compression ratios.
+*   **Previews** for Textures, Text, and Hex.
+*   Drag-and-drop Packing and Extraction.
+
+## 🛠 Build
+
+Requires **Windows x64** and **.NET 10.0**.
+
+```bash
+dotnet build -c Release
+```
