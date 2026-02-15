@@ -1,18 +1,14 @@
-
 using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 namespace GDeflate.Core
 {
     /// <summary>
-    /// GDeflate Stream v6.
-    /// Implements "Scatter/Gather" I/O scheduling for Block-Level Deduplicated data.
-    /// Reads are coalesced (merged) to minimize IOPS.
+    /// Game Stream (Hybrid GDeflate/Zstd with Full Streaming support).
     /// </summary>
     public class GDeflateStream : Stream
     {
@@ -21,15 +17,20 @@ namespace GDeflate.Core
         
         private readonly bool _isCompressed;
         private readonly bool _isEncrypted;
+        private readonly bool _isStreaming;
         private readonly uint _method;
 
         private long _position;
-        private byte[]? _decompressionBuffer; // 64KB Scratch
-        private IntPtr _pOutput = IntPtr.Zero;
+        private byte[]? _buffer; // Used for Solid mode
+        
+        // Streaming State
+        private GDeflateArchive.ChunkHeaderEntry[]? _chunks;
+        private byte[]? _currentChunkCache;
+        private int _currentChunkIndex = -1;
+        private long _chunksDataStartOffset;
 
         // Decryption State
         private AesGcm? _aes;
-        private byte[]? _decryptBuffer;
 
         public GDeflateStream(GDeflateArchive archive, GDeflateArchive.FileEntry entry)
         {
@@ -39,13 +40,40 @@ namespace GDeflate.Core
             
             _isCompressed = (entry.Flags & GDeflateArchive.FLAG_IS_COMPRESSED) != 0;
             _isEncrypted = (entry.Flags & GDeflateArchive.FLAG_ENCRYPTED) != 0;
+            _isStreaming = (entry.Flags & GDeflateArchive.FLAG_STREAMING) != 0;
             _method = entry.Flags & GDeflateArchive.MASK_METHOD;
 
             if (_isEncrypted)
             {
                 if (_archive.DecryptionKey == null) throw new UnauthorizedAccessException("Encrypted file requires key.");
-                _aes = new AesGcm(_archive.DecryptionKey);
+                _aes = new AesGcm(_archive.DecryptionKey, 16);
             }
+
+            if (_isStreaming && _method == GDeflateArchive.METHOD_ZSTD)
+            {
+                LoadChunkTable();
+            }
+        }
+
+        private void LoadChunkTable()
+        {
+            // Read Table Header from DataOffset
+            byte[] countBuffer = new byte[4];
+            RandomAccess.Read(_archive.GetFileHandle(), countBuffer, _entry.DataOffset);
+            int blockCount = BitConverter.ToInt32(countBuffer);
+
+            int tableSize = blockCount * 8; // 8 bytes per entry
+            byte[] tableData = new byte[tableSize];
+            RandomAccess.Read(_archive.GetFileHandle(), tableData, _entry.DataOffset + 4);
+
+            _chunks = new GDeflateArchive.ChunkHeaderEntry[blockCount];
+            for (int i = 0; i < blockCount; i++)
+            {
+                _chunks[i].CompressedSize = BitConverter.ToUInt32(tableData, i * 8);
+                _chunks[i].OriginalSize = BitConverter.ToUInt32(tableData, i * 8 + 4);
+            }
+            
+            _chunksDataStartOffset = _entry.DataOffset + 4 + tableSize;
         }
 
         public override bool CanRead => true;
@@ -59,129 +87,163 @@ namespace GDeflate.Core
         public override int Read(Span<byte> buffer)
         {
             if (_position >= Length) return 0;
-            int bytesToRead = (int)Math.Min(buffer.Length, Length - _position);
-            if (bytesToRead <= 0) return 0;
-
-            // --- I/O Scheduler ---
-            // 1. Identify which logical blocks cover the requested range
-            // 2. Map logical blocks to physical offsets via Global Block Table
-            // 3. Coalesce adjacent physical blocks into single IO requests
-            // 4. Execute Reads
-            // 5. Decompress/Decrypt into destination
-
-            // Identify Logical Range
-            // Note: Since we have variable block sizes in theory (though usually 64KB uncompressed),
-            // we need to scan the BlockTable sizes. 
-            // Optimization: Assuming standard GDeflate tile size 65536 for all but last.
             
-            const int TileSize = 65536;
-            int startBlock = (int)(_position / TileSize);
-            int endBlock = (int)((_position + bytesToRead - 1) / TileSize);
-            
-            int outputOffset = 0;
-            int currentPosInTile = (int)(_position % TileSize);
-
-            // Re-use buffers
-            if (_decompressionBuffer == null) 
+            if (_isStreaming && _method == GDeflateArchive.METHOD_ZSTD && _chunks != null)
             {
-                _decompressionBuffer = ArrayPool<byte>.Shared.Rent(TileSize);
-                unsafe { _pOutput = Marshal.AllocHGlobal(TileSize); }
+                return ReadStreaming(buffer);
             }
 
-            for (int i = startBlock; i <= endBlock; i++)
+            // Fallback for Solid (Non-Streaming) or GDeflate blobs
+            if (_buffer == null)
             {
-                // Access Metadata (Zero-Copy)
-                var blockInfo = _archive.GetBlockEntry((uint)(_entry.FirstBlockIndex + i));
-                
-                // Read Raw Data (Synchronous here for Stream API, but uses RandomAccess)
-                // In a real engine, we would pre-fetch all blocks in 'start..end' range here.
-                // For this implementation loop, we read one by one, but RandomAccess is thread-safe and cached by OS.
-                // NOTE: To strictly implement Scatter/Gather, we would build a list here.
-                
-                // Let's implement immediate block processing for simplicity of the Stream API,
-                // BUT use RandomAccess to jump physically.
-                
-                int rawSize = (int)blockInfo.CompressedSize;
-                byte[] rawData = ArrayPool<byte>.Shared.Rent(rawSize);
-
-                try
-                {
-                    // Random Access Read (No FileStream Position change)
-                    RandomAccess.Read(_archive.GetFileHandle(), new Span<byte>(rawData, 0, rawSize), blockInfo.PhysicalOffset);
-
-                    // Decrypt?
-                    Span<byte> processData = new Span<byte>(rawData, 0, rawSize);
-                    
-                    if (_isEncrypted)
-                    {
-                        if (rawSize < 28) throw new InvalidDataException("Encrypted block too small");
-                        int cipherSize = rawSize - 28;
-                        if (_decryptBuffer == null || _decryptBuffer.Length < cipherSize) 
-                        {
-                            if (_decryptBuffer != null) ArrayPool<byte>.Shared.Return(_decryptBuffer);
-                            _decryptBuffer = ArrayPool<byte>.Shared.Rent(Math.Max(cipherSize, 65536));
-                        }
-
-                        var nonce = processData.Slice(0, 12);
-                        var tag = processData.Slice(12, 16);
-                        var cipher = processData.Slice(28, cipherSize);
-                        var plain = new Span<byte>(_decryptBuffer, 0, cipherSize);
-                        
-                        _aes!.Decrypt(nonce, cipher, tag, plain);
-                        processData = plain;
-                    }
-
-                    // Decompress or Copy
-                    int bytesInThisTile = 0;
-                    
-                    if (_isCompressed && _method == GDeflateArchive.METHOD_GDEFLATE)
-                    {
-                        unsafe 
-                        {
-                             fixed (byte* pIn = processData)
-                             {
-                                 bool ok = GDeflateCpuApi.Decompress((void*)_pOutput, blockInfo.UncompressedSize, pIn, (ulong)processData.Length, 1);
-                                 if (!ok) throw new InvalidDataException("Decompression failed");
-                                 
-                                 // Copy relevant part to user buffer
-                                 Marshal.Copy(_pOutput, _decompressionBuffer!, 0, (int)blockInfo.UncompressedSize);
-                                 bytesInThisTile = (int)blockInfo.UncompressedSize;
-                             }
-                        }
-                    }
-                    else if (_isCompressed && (_method == GDeflateArchive.METHOD_DEFLATE || _method == GDeflateArchive.METHOD_ZSTD))
-                    {
-                        // Legacy/CPU Decompress (simplified: unpack whole block)
-                        using var ms = new MemoryStream(processData.ToArray()); // Alloc :(
-                        using var ds = new DeflateStream(ms, CompressionMode.Decompress);
-                        bytesInThisTile = ds.Read(_decompressionBuffer!, 0, _decompressionBuffer!.Length);
-                    }
-                    else // STORE
-                    {
-                        processData.CopyTo(_decompressionBuffer);
-                        bytesInThisTile = processData.Length;
-                    }
-
-                    // Calculate intersection of this tile with user request
-                    int available = bytesInThisTile - currentPosInTile;
-                    int toCopy = Math.Min(available, bytesToRead - outputOffset);
-                    
-                    if (toCopy > 0)
-                    {
-                        new Span<byte>(_decompressionBuffer, currentPosInTile, toCopy).CopyTo(buffer.Slice(outputOffset, toCopy));
-                        outputOffset += toCopy;
-                    }
-                    
-                    currentPosInTile = 0; // Next blocks start at 0
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rawData);
-                }
+                _buffer = new byte[_entry.OriginalSize];
+                LoadAndDecompressFull(_buffer);
             }
 
-            _position += outputOffset;
-            return outputOffset;
+            int available = (int)(Length - _position);
+            int toCopy = Math.Min(buffer.Length, available);
+            new Span<byte>(_buffer, (int)_position, toCopy).CopyTo(buffer);
+            _position += toCopy;
+            return toCopy;
+        }
+
+        private int ReadStreaming(Span<byte> buffer)
+        {
+            int totalRead = 0;
+            while (totalRead < buffer.Length && _position < Length)
+            {
+                // 1. Find which chunk covers _position
+                int chunkIdx = 0;
+                long pos = 0;
+                
+                // Optimized: We assume fixed size chunks mostly, but table allows variable. 
+                // A linear scan is fine for prototype. For AAA, use O(1) math if fixed size.
+                // Since we write 64KB fixed blocks (except last), we can guess.
+                long p = _position;
+                if (_chunks![0].OriginalSize == 65536)
+                {
+                    chunkIdx = (int)(p / 65536);
+                    pos = chunkIdx * 65536;
+                    // Verify last chunk boundary
+                    if (chunkIdx >= _chunks.Length) chunkIdx = _chunks.Length - 1; 
+                }
+                else
+                {
+                    // Variable size fallback
+                    for (int i = 0; i < _chunks.Length; i++)
+                    {
+                        if (p < pos + _chunks[i].OriginalSize)
+                        {
+                            chunkIdx = i;
+                            break;
+                        }
+                        pos += _chunks[i].OriginalSize;
+                    }
+                }
+
+                // 2. Load Chunk if needed
+                if (_currentChunkIndex != chunkIdx)
+                {
+                    LoadChunk(chunkIdx);
+                }
+
+                // 3. Copy from chunk
+                int offsetInChunk = (int)(_position - pos); // pos is start of this chunk
+                int availableInChunk = _currentChunkCache!.Length - offsetInChunk;
+                int toCopy = Math.Min(buffer.Length - totalRead, availableInChunk);
+                
+                new Span<byte>(_currentChunkCache, offsetInChunk, toCopy).CopyTo(buffer.Slice(totalRead));
+                
+                _position += toCopy;
+                totalRead += toCopy;
+            }
+            return totalRead;
+        }
+
+        private void LoadChunk(int index)
+        {
+            // Calculate file offset for this chunk
+            long fileOffset = _chunksDataStartOffset;
+            for(int i=0; i<index; i++) fileOffset += _chunks![i].CompressedSize;
+
+            uint cSize = _chunks[index].CompressedSize;
+            uint oSize = _chunks[index].OriginalSize;
+
+            byte[] raw = new byte[cSize];
+            RandomAccess.Read(_archive.GetFileHandle(), raw, fileOffset);
+
+            // Decrypt
+            if (_isEncrypted)
+            {
+                 if (_aes == null) throw new InvalidOperationException("Encrypted content requires valid key initialization.");
+                 
+                 int cipherSize = raw.Length - 28;
+                 byte[] decrypted = new byte[cipherSize];
+                 var nonce = new ReadOnlySpan<byte>(raw, 0, 12);
+                 var tag = new ReadOnlySpan<byte>(raw, 12, 16);
+                 var cipher = new ReadOnlySpan<byte>(raw, 28, cipherSize);
+                 _aes.Decrypt(nonce, cipher, tag, decrypted);
+                 raw = decrypted;
+            }
+
+            // Decompress
+            byte[] decompressed = new byte[oSize];
+            unsafe {
+                fixed(byte* pIn = raw) fixed(byte* pOut = decompressed) {
+                     ulong res = ZstdCpuApi.ZSTD_decompress((IntPtr)pOut, oSize, (IntPtr)pIn, (ulong)raw.Length);
+                     if (ZstdCpuApi.ZSTD_isError(res) != 0) throw new IOException($"Streaming Decomp Error Chunk {index}");
+                }
+            }
+            _currentChunkCache = decompressed;
+            _currentChunkIndex = index;
+        }
+
+        private void LoadAndDecompressFull(Span<byte> output)
+        {
+            byte[] rawData = new byte[_entry.CompressedSize];
+            RandomAccess.Read(_archive.GetFileHandle(), rawData, _entry.DataOffset);
+            
+            Span<byte> processData = rawData;
+
+            if (_isEncrypted)
+            {
+                if (_aes == null) throw new InvalidOperationException("Encrypted content requires valid key initialization.");
+
+                int cipherSize = rawData.Length - 28;
+                byte[] decrypted = new byte[cipherSize];
+                var nonce = processData.Slice(0, 12);
+                var tag = processData.Slice(12, 16);
+                var cipher = processData.Slice(28, cipherSize);
+                _aes.Decrypt(nonce, cipher, tag, decrypted);
+                processData = decrypted;
+            }
+
+            if (_isCompressed)
+            {
+                if (_method == GDeflateArchive.METHOD_GDEFLATE)
+                {
+                    unsafe {
+                        fixed(byte* pIn = processData) fixed(byte* pOut = output) {
+                            if (!GDeflateCpuApi.Decompress((void*)pOut, (ulong)output.Length, pIn, (ulong)processData.Length, 1))
+                                throw new IOException("GDeflate Decompression Failed");
+                        }
+                    }
+                }
+                else if (_method == GDeflateArchive.METHOD_ZSTD)
+                {
+                    unsafe {
+                        fixed(byte* pIn = processData) fixed(byte* pOut = output) {
+                            ulong res = ZstdCpuApi.ZSTD_decompress((IntPtr)pOut, (ulong)output.Length, (IntPtr)pIn, (ulong)processData.Length);
+                            if (ZstdCpuApi.ZSTD_isError(res) != 0)
+                                throw new IOException("Zstd Decompression Failed");
+                        }
+                    }
+                }
+            }
+            else
+            {
+                processData.CopyTo(output);
+            }
         }
 
         public override long Seek(long offset, SeekOrigin origin)
@@ -204,9 +266,6 @@ namespace GDeflate.Core
 
         protected override void Dispose(bool disposing)
         {
-            if (_decompressionBuffer != null) ArrayPool<byte>.Shared.Return(_decompressionBuffer);
-            if (_decryptBuffer != null) ArrayPool<byte>.Shared.Return(_decryptBuffer);
-            if (_pOutput != IntPtr.Zero) Marshal.FreeHGlobal(_pOutput);
             _aes?.Dispose();
             base.Dispose(disposing);
         }

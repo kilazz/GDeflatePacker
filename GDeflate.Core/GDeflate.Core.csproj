@@ -8,15 +8,17 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
-		<!--
-      Copy GDeflate.dll to the root output directory.
-      This ensures DllImport finds it immediately without relying on complex resolvers.
-    -->
 		<Content Include="libs\GDeflate.dll">
 			<Link>GDeflate.dll</Link>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Pack>true</Pack>
 			<PackagePath>contentFiles\any\any</PackagePath>
 		</Content>
+    <!-- Assume user provides libzstd.dll for CPU compression -->
+    <Content Include="libs\libzstd.dll">
+      <Link>libzstd.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Pack>true</Pack>
+    </Content>
 	</ItemGroup>
 </Project>

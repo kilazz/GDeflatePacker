@@ -1,3 +1,4 @@
+
 using System;
 using System.IO;
 using System.Diagnostics;
@@ -5,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using GDeflate.Core;
+using System.Threading;
 
 namespace GDeflateCLI
 {
@@ -35,6 +37,10 @@ namespace GDeflateCLI
                     case "-c":
                         RunCompress(args);
                         break;
+                    case "patch": // New
+                    case "-delta":
+                        RunPatch(args);
+                        break;
                     case "decompress":
                     case "-d":
                         RunDecompress(args);
@@ -55,7 +61,7 @@ namespace GDeflateCLI
                     case "-i":
                         RunInfo(args);
                         break;
-                    case "mount": // New Modding Command
+                    case "mount":
                     case "-m":
                         RunMount(args);
                         break;
@@ -79,9 +85,6 @@ namespace GDeflateCLI
         static byte[]? ParseKey(string keyString)
         {
             if (string.IsNullOrEmpty(keyString)) return null;
-            // Expecting 32-byte key in hex or base64. 
-            // For simplicity in CLI, if length is 32 chars, take bytes, if 64 chars hex.
-            // Simplified: SHA256 the string to get 32 byte key.
             using var sha = System.Security.Cryptography.SHA256.Create();
             return sha.ComputeHash(Encoding.UTF8.GetBytes(keyString));
         }
@@ -129,13 +132,8 @@ namespace GDeflateCLI
 
             var processor = new GDeflateProcessor();
             Console.WriteLine($"Processing: {Path.GetFileName(inputPath)}");
-            Console.WriteLine($"Mode: Parallel Async (Scatter/Gather)");
-            Console.WriteLine($"Layout: Heuristic (Hot/Cold Split)");
-
-            Console.WriteLine($"Level: {level} (1-12)");
-            Console.WriteLine($"Deduplication: {(dedup ? "ON (CAS)" : "OFF")}");
-            Console.WriteLine($"Texture Streaming: {(mipSplit ? "ON (Mip Splitting)" : "OFF")}");
-            if (key != null) Console.WriteLine($"Encryption: AES-GCM (Enabled)");
+            Console.WriteLine($"Mode: Full Archive");
+            Console.WriteLine($"Options: Dedup={dedup}, MipSplit={mipSplit}, Level={level}");
             
             var sw = Stopwatch.StartNew();
             Dictionary<string, string> map;
@@ -146,10 +144,39 @@ namespace GDeflateCLI
                 map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
 
             Console.WriteLine($"Target files: {map.Count}");
-            processor.CompressFilesToArchiveAsync(map, outputPath, dedup, level, encryptionKey: key, enableMipSplitting: mipSplit).GetAwaiter().GetResult();
+            processor.CompressFilesToArchive(map, outputPath, dedup, level, encryptionKey: key, enableMipSplitting: mipSplit);
 
             sw.Stop();
             PrintSuccess($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
+        }
+
+        static void RunPatch(string[] args)
+        {
+            if (args.Length < 3)
+            {
+                Console.WriteLine("Usage: GDeflateCLI patch <base.gpck> <new_content_folder> <output_patch.gpck>");
+                return;
+            }
+
+            string basePath = args[1];
+            string contentPath = args[2];
+            string outPath = args[3];
+
+            if (!File.Exists(basePath)) { Console.WriteLine("Base archive not found."); return; }
+            if (!Directory.Exists(contentPath)) { Console.WriteLine("Content folder not found."); return; }
+
+            Console.WriteLine($"Creating Delta Patch for: {Path.GetFileName(basePath)}");
+            Console.WriteLine($"Source Content: {contentPath}");
+            
+            var sw = Stopwatch.StartNew();
+            var map = GDeflateProcessor.BuildFileMap(contentPath);
+            
+            var proc = new GDeflateProcessor();
+            // Note: This is an async method in Core, calling via task.run/wait
+            proc.CreatePatchArchiveAsync(basePath, map, outPath, 9, null, null, CancellationToken.None).GetAwaiter().GetResult();
+            
+            sw.Stop();
+            PrintSuccess($"Patch created: {outPath} ({sw.Elapsed.TotalSeconds:F2}s)");
         }
 
         static void RunDecompress(string[] args)
@@ -204,31 +231,16 @@ namespace GDeflateCLI
             }
 
             Console.WriteLine($"Extracting '{target}' from {Path.GetFileName(inputPath)}...");
-            
             try 
             {
-                var sw = Stopwatch.StartNew();
                 new GDeflateProcessor().ExtractSingleFile(inputPath, outputDir, target, key);
-                sw.Stop();
-                PrintSuccess($"Extracted successfully in {sw.ElapsedMilliseconds} ms.");
+                PrintSuccess($"Extracted successfully.");
             }
-            catch (FileNotFoundException)
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine($"File '{target}' not found in archive.");
-                Console.ResetColor();
-            }
-            catch (UnauthorizedAccessException)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Error: File is encrypted. Provide valid --key.");
-                Console.ResetColor();
-            }
+            catch(Exception e) { PrintError(e); }
         }
 
         static void RunCat(string[] args)
         {
-            // Cat (Print) not ideal for binary encrypted files, but we can try if key provided.
             if (args.Length < 3)
             {
                 Console.WriteLine("Usage: GDeflateCLI cat <archive.gpck> <file_inside> [--key secret]");
@@ -287,7 +299,7 @@ namespace GDeflateCLI
             else 
             {
                 Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("VERIFICATION FAILED. The archive contains corrupted data or key invalid.");
+                Console.WriteLine("VERIFICATION FAILED.");
                 Console.ResetColor();
             }
         }
@@ -310,13 +322,13 @@ namespace GDeflateCLI
                 var info = archive.GetPackageInfo();
                 
                 if (info.Magic != "GPCK") { Console.WriteLine("Invalid File"); return; }
-                if (info.Version != 5) { Console.WriteLine($"Unsupported Version: {info.Version} (Expected 5)"); return; }
-
-                Console.WriteLine($"Version: {info.Version} (v5 AAAA)");
+                
+                Console.WriteLine($"Version: {info.Version}");
                 Console.WriteLine($"File Count: {info.FileCount}");
-                Console.WriteLine(new string('-', 105));
-                Console.WriteLine($"{"File/Hash",-55} | {"Size",-10} | {"CRC32",-10} | {"Method",-15}");
-                Console.WriteLine(new string('-', 105));
+                Console.WriteLine($"Dependencies: {info.DependencyCount}");
+                Console.WriteLine(new string('-', 115));
+                Console.WriteLine($"{"File/Hash",-50} | {"Size",-8} | {"Align",-6} | {"Method",-15}");
+                Console.WriteLine(new string('-', 115));
 
                 int printed = 0;
                 foreach (var entry in info.Entries)
@@ -328,12 +340,15 @@ namespace GDeflateCLI
                     }
 
                     string displayName = entry.Path;
-                    if (displayName.Length > 53)
+                    if (displayName.Length > 48)
                     {
-                        displayName = "..." + displayName.Substring(displayName.Length - 50);
+                        displayName = "..." + displayName.Substring(displayName.Length - 45);
                     }
+                    
+                    // Show 4K or 64K alignment info
+                    string align = entry.Alignment >= 1024 ? (entry.Alignment/1024) + "K" : entry.Alignment + "B";
 
-                    Console.WriteLine($"{displayName,-55} | {entry.CompressedSize / 1024.0:F1} KB   | {entry.Crc32:X8}   | {entry.Method,-15}");
+                    Console.WriteLine($"{displayName,-50} | {entry.OriginalSize / 1024.0:F1}KB | {align,-6} | {entry.Method,-15}");
                 }
             }
             catch(Exception ex) { PrintError(ex); }
@@ -341,7 +356,6 @@ namespace GDeflateCLI
 
         static void RunMount(string[] args)
         {
-            // Simulates game startup: loading Base -> Patch -> Mod
             if (args.Length < 3)
             {
                 Console.WriteLine("Usage: GDeflateCLI mount <base.gpck> <mod.gpck> ... --check <file_to_check>");
@@ -389,10 +403,6 @@ namespace GDeflateCLI
                 {
                     string source = vfs.GetSourceArchiveName(checkFile);
                     PrintSuccess($"FOUND in: {source}");
-                    
-                    // Actually try to read 4 bytes to prove it works
-                    using var s = vfs.OpenRead(checkFile);
-                    Console.WriteLine($"Stream Open OK. Size: {s.Length} bytes.");
                 }
                 else
                 {
@@ -414,18 +424,15 @@ namespace GDeflateCLI
 
         static void ShowHelp()
         {
-            Console.WriteLine("GDeflate CLI Tool (v5)");
+            Console.WriteLine("GDeflate CLI Tool");
             Console.WriteLine("Commands:");
-            Console.WriteLine("  compress <in> [out] [options]    : Pack (Async Scatter/Gather)");
-            Console.WriteLine("    --key <secret>                 : Encryption key");
-            Console.WriteLine("    --no-dedup                     : Disable CAS Deduplication");
-            Console.WriteLine("    --mip-split                    : Enable Texture Streaming (Split High/Low Mips)");
+            Console.WriteLine("  compress <in> [out] [opts]       : Standard Pack");
+            Console.WriteLine("  patch <base> <new_dir> <out>     : Create Delta Patch Archive");
             Console.WriteLine("  decompress <gpck> [outDir]       : Unpack All");
             Console.WriteLine("  extract-file <gpck> <file>       : Unpack Single File");
-            Console.WriteLine("  cat <gpck> <file>                : Read file to stdout");
             Console.WriteLine("  verify <gpck>                    : Check integrity");
-            Console.WriteLine("  info <gpck>                      : Inspect");
-            Console.WriteLine("  mount <base> <mod> --check <f>   : Test Modding VFS");
+            Console.WriteLine("  info <gpck>                      : Inspect Alignment & Deps");
+            Console.WriteLine("  mount <base> <mod> --check <f>   : Test VFS Layering");
         }
 
         static void PrintSuccess(string msg)

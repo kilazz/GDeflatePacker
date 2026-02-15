@@ -6,7 +6,7 @@ using System.Linq;
 namespace GDeflate.Core
 {
     /// <summary>
-    /// Virtual File System (VFS) for AAAA Modding Support.
+    /// Virtual File System (VFS).
     /// Allows mounting multiple .gpck archives as layers.
     /// Priority: Last mounted archive overrides files from previous ones.
     /// Example: Base.gpck (Layer 0) -> Patch01.gpck (Layer 1) -> Mod_4kTextures.gpck (Layer 2)
@@ -15,8 +15,8 @@ namespace GDeflate.Core
     {
         private readonly List<GDeflateArchive> _mountedArchives = new();
 
-        // Maps a FilePath Hash -> Index of the archive in _mountedArchives that holds the latest version
-        private readonly Dictionary<ulong, int> _virtualLookup = new();
+        // Maps AssetID (GUID) -> Index of the archive in _mountedArchives
+        private readonly Dictionary<Guid, int> _virtualLookup = new();
 
         public int MountedCount => _mountedArchives.Count;
 
@@ -24,7 +24,6 @@ namespace GDeflate.Core
         /// Mounts an archive into the VFS.
         /// </summary>
         /// <param name="path">Path to .gpck file</param>
-        /// <param name="priority">If true, this archive overrides existing files. Usually true for mods/patches.</param>
         public void Mount(string path)
         {
             var archive = new GDeflateArchive(path);
@@ -37,8 +36,8 @@ namespace GDeflate.Core
                 var entry = archive.GetEntryByIndex(i);
 
                 // Last Writer Wins (Modding behavior)
-                // If a hash already exists, we update the index to point to THIS archive
-                _virtualLookup[entry.PathHash] = archiveIndex;
+                // If an AssetID already exists, we update the index to point to THIS archive
+                _virtualLookup[entry.AssetId] = archiveIndex;
             }
         }
 
@@ -47,8 +46,8 @@ namespace GDeflate.Core
         /// </summary>
         public bool FileExists(string virtualPath)
         {
-            ulong hash = PathHasher.Hash(virtualPath);
-            return _virtualLookup.ContainsKey(hash);
+            Guid id = AssetIdGenerator.Generate(virtualPath);
+            return _virtualLookup.ContainsKey(id);
         }
 
         /// <summary>
@@ -56,12 +55,13 @@ namespace GDeflate.Core
         /// </summary>
         public Stream OpenRead(string virtualPath)
         {
-            ulong hash = PathHasher.Hash(virtualPath);
+            Guid id = AssetIdGenerator.Generate(virtualPath);
 
-            if (_virtualLookup.TryGetValue(hash, out int archiveIndex))
+            if (_virtualLookup.TryGetValue(id, out int archiveIndex))
             {
                 var archive = _mountedArchives[archiveIndex];
-                if (archive.TryGetEntry(virtualPath, out var entry))
+                // v8 TryGetEntry takes a GUID
+                if (archive.TryGetEntry(id, out var entry))
                 {
                     return archive.OpenRead(entry);
                 }
@@ -75,8 +75,8 @@ namespace GDeflate.Core
         /// </summary>
         public string GetSourceArchiveName(string virtualPath)
         {
-            ulong hash = PathHasher.Hash(virtualPath);
-            if (_virtualLookup.TryGetValue(hash, out int archiveIndex))
+            Guid id = AssetIdGenerator.Generate(virtualPath);
+            if (_virtualLookup.TryGetValue(id, out int archiveIndex))
             {
                 return Path.GetFileName(_mountedArchives[archiveIndex].FilePath);
             }

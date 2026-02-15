@@ -1,4 +1,4 @@
-# GDeflatePacker
+# Game Asset Browser
 **GDeflate Compression** built on **.NET 10.0**.
 This project provides efficient tools for compressing and decompressing files using Microsoft's [GDeflate](https://github.com/microsoft/DirectStorage/tree/main/GDeflate) algorithm, utilizing direct native memory (`unsafe`) for maximum performance.
 

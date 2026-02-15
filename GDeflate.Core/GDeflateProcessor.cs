@@ -1,10 +1,8 @@
-
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -17,39 +15,29 @@ namespace GDeflate.Core
     public class GDeflateProcessor
     {
         private const int TileSize = 65536; 
-        private const int Alignment = 4096;
+        private const int ChunkSize = 65536; // 64KB chunks for streaming
+        private const int DefaultAlignment = 16;
+        private const int GpuAlignment = 4096;
 
-        public enum CompressionMethod
-        {
-            Store = 0,
-            GDeflate = 1,
-            Deflate = 2,
-            Zstd = 3
-        }
-
-        // --- Intermediate Structures for Packing ---
         private class ProcessedFile
         {
-            public ulong PathHash;
-            public string OriginalPath;
+            public Guid AssetId;
+            public required string OriginalPath;
             public uint OriginalSize;
-            public CompressionMethod Method;
-            public List<ChunkInfo> Chunks = new();
+            public uint CompressedSize;
+            public byte[]? CompressedData; 
             public uint Flags;
+            public int Alignment;
+            public uint Meta1;
+            public uint Meta2;
         }
-
-        private struct ChunkInfo
+        
+        public class DependencyDefinition
         {
-            public ulong ContentHash; // xxHash64 of compressed data (or uncompressed if Store)
-            public int Length;
-            public int UncompressedLength;
-            // Data handling
-            public byte[]? MemoryData;
-            public string? TempFile;
-            public long TempOffset;
+            public required string SourcePath;
+            public required string TargetPath;
+            public GDeflateArchive.DependencyType Type;
         }
-
-        // --- API ---
 
         public static Dictionary<string, string> BuildFileMap(string sourceDirectory, string searchPattern = "*", SearchOption searchOption = SearchOption.AllDirectories)
         {
@@ -72,304 +60,327 @@ namespace GDeflate.Core
             int level, 
             byte[]? key,
             bool enableMipSplit,
+            List<DependencyDefinition>? dependencies,
             IProgress<int>? progress, 
             CancellationToken token)
         {
-            GDeflateCpuApi.IsAvailable(); // Ensure DLL loaded
-
+            GDeflateCpuApi.IsAvailable(); 
+            bool zstdAvailable = ZstdCpuApi.IsAvailable();
             var processedFiles = new ConcurrentBag<ProcessedFile>();
             int processedCount = 0;
-            string tempDir = Path.Combine(Path.GetTempPath(), "GDeflate_" + Guid.NewGuid());
-            Directory.CreateDirectory(tempDir);
-
-            try
+            
+            await Parallel.ForEachAsync(fileMap, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2), CancellationToken = token }, async (kvp, ct) =>
             {
-                // 1. Parallel Processing (Chunking + Compression + Hashing)
-                await Parallel.ForEachAsync(fileMap, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (kvp, ct) =>
-                {
-                    await ProcessFile(kvp.Key, kvp.Value, tempDir, level, key, enableMipSplit, processedFiles, ct);
-                    int c = Interlocked.Increment(ref processedCount);
-                    progress?.Report((int)((c / (float)fileMap.Count) * 50));
-                });
+                await ProcessFile(kvp.Key, kvp.Value, level, key, enableMipSplit, zstdAvailable, processedFiles, ct);
+                int c = Interlocked.Increment(ref processedCount);
+                progress?.Report((int)((c / (float)fileMap.Count) * 70));
+            });
 
-                // 2. Global Deduplication & Layout
-                // Map: ChunkHash -> GlobalBlockIndex
-                var globalChunks = new Dictionary<ulong, int>(); 
-                var uniqueChunksList = new List<ChunkInfo>();
-                
-                // Final ordered list of files
-                var sortedFiles = processedFiles.OrderBy(f => f.PathHash).ToList();
-                
-                // Assign Block Indices
-                foreach (var file in sortedFiles)
-                {
-                    foreach (var chunk in file.Chunks)
-                    {
-                        if (enableDedup && globalChunks.TryGetValue(chunk.ContentHash, out int existingIndex))
-                        {
-                            // Reuse existing block (Metadata points to existing index, logic handled later)
-                            // Actually, ProcessedFile needs to store INDICES, but we haven't built the table yet.
-                            // We need to map ChunkInfo -> Global Index.
-                            // But wait, ProcessedFile currently holds the DATA. 
-                            // We don't change ProcessedFile structure, we just skip adding to unique list.
-                        }
-                        else
-                        {
-                            globalChunks[chunk.ContentHash] = uniqueChunksList.Count;
-                            uniqueChunksList.Add(chunk);
-                        }
-                    }
-                }
+            var sortedFiles = processedFiles.OrderBy(f => f.AssetId).ToList();
 
-                // 3. Write Archive (Scatter/Gather)
-                await WriteArchiveV6(sortedFiles, uniqueChunksList, globalChunks, outputPath, key, progress, token);
-            }
-            finally
-            {
-                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
-            }
+            var depEntries = dependencies?.Select(d => new GDeflateArchive.DependencyEntry {
+                SourceAssetId = AssetIdGenerator.Generate(d.SourcePath),
+                TargetAssetId = AssetIdGenerator.Generate(d.TargetPath),
+                Type = d.Type
+            }).ToList() ?? new List<GDeflateArchive.DependencyEntry>();
+
+            await WriteArchive(sortedFiles, depEntries, outputPath, progress, token);
         }
 
-        // Sync Wrapper
         public void CompressFilesToArchive(IDictionary<string, string> f, string o, bool d = true, int l = 9, bool m = false, IProgress<int>? p = null, CancellationToken t = default)
-            => CompressFilesToArchiveAsync(f, o, d, l, null, m, p, t).GetAwaiter().GetResult();
+            => CompressFilesToArchiveAsync(f, o, d, l, null, m, null, p, t).GetAwaiter().GetResult();
 
-        // --- Internal Logic ---
-
-        private async Task ProcessFile(string inputPath, string relPath, string tempDir, int level, byte[]? key, bool mipSplit, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
+        private async Task ProcessFile(string inputPath, string relPath, int level, byte[]? key, bool mipSplit, bool zstdAvail, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
         {
-             // MipSplitting Logic (Simplification: If mipSplit is on, we generate TWO files in the bag)
-             // ... [Omitting complex DdsUtils logic from previous step for brevity, assuming standard processing] ...
-             // Let's implement standard processing which feeds the chunker.
+            byte[] data = await File.ReadAllBytesAsync(inputPath, ct); 
+            string ext = Path.GetExtension(inputPath).ToLowerInvariant();
+            bool useGDeflate = ext == ".dds" || ext == ".model" || ext == ".geom" || ext == ".gdef";
+            
+            // Texture Manifest Extraction
+            uint m1 = 0, m2 = 0;
+            if (ext == ".dds")
+            {
+                var h = DdsUtils.GetHeaderInfo(data);
+                if (h.HasValue)
+                {
+                    m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
+                    m2 = ((uint)h.Value.MipCount << 8);
+                }
+            }
 
-            byte[] data = await File.ReadAllBytesAsync(inputPath, ct); // Todo: Stream for huge files
+            // Decide Streaming vs Solid
+            bool isStreaming = data.Length > 256 * 1024; 
             
             var pf = new ProcessedFile 
             { 
-                PathHash = PathHasher.Hash(relPath), 
+                AssetId = AssetIdGenerator.Generate(relPath),
                 OriginalPath = relPath, 
                 OriginalSize = (uint)data.Length,
-                Method = CompressionMethod.GDeflate 
+                Meta1 = m1,
+                Meta2 = m2
             };
-            
-            // Set Flags
-            pf.Flags |= GDeflateArchive.FLAG_IS_COMPRESSED;
-            if (key != null) pf.Flags |= GDeflateArchive.FLAG_ENCRYPTED;
-            pf.Flags |= GDeflateArchive.METHOD_GDEFLATE;
 
-            // Chunking
-            using var ms = new MemoryStream(data);
-            byte[] inBuffer = new byte[TileSize];
-            
-            // compression context
-            ulong bound = GDeflateCpuApi.CompressBound(TileSize);
-            IntPtr pOut = Marshal.AllocHGlobal((int)bound);
-            
-            try
+            pf.Alignment = useGDeflate ? GpuAlignment : DefaultAlignment;
+            int alignTemp = pf.Alignment;
+            int alignPower = 0;
+            while(alignTemp > 1) { alignTemp >>= 1; alignPower++; }
+            pf.Flags |= (uint)(alignPower << GDeflateArchive.SHIFT_ALIGNMENT);
+
+            if (useGDeflate)
             {
-                int bytesRead;
-                while ((bytesRead = ms.Read(inBuffer, 0, TileSize)) > 0)
+                pf.Flags |= GDeflateArchive.FLAG_IS_COMPRESSED | GDeflateArchive.METHOD_GDEFLATE;
+                pf.CompressedData = CompressGDeflate(data, level);
+            }
+            else if (zstdAvail) 
+            {
+                pf.Flags |= GDeflateArchive.FLAG_IS_COMPRESSED | GDeflateArchive.METHOD_ZSTD;
+                if (isStreaming)
                 {
-                    // Compress Chunk
-                    byte[] processedChunkData;
-                    int uncompLen = bytesRead;
-                    
-                    unsafe 
-                    {
-                        ulong compSize = bound;
-                        fixed(byte* pIn = inBuffer)
-                        {
-                            bool ok = GDeflateCpuApi.Compress((void*)pOut, ref compSize, pIn, (ulong)bytesRead, (uint)level, 0);
-                            if (!ok) throw new Exception("Compression failed");
-                            
-                            // Encrypt?
-                            if (key != null)
-                            {
-                                int cipherSize = (int)compSize;
-                                int encTotal = 12 + 16 + cipherSize;
-                                processedChunkData = new byte[encTotal];
-                                
-                                var spanOut = new Span<byte>(processedChunkData);
-                                RandomNumberGenerator.Fill(spanOut.Slice(0, 12)); // Nonce
-                                
-                                using var aes = new AesGcm(key);
-                                aes.Encrypt(
-                                    spanOut.Slice(0, 12), 
-                                    new ReadOnlySpan<byte>((void*)pOut, cipherSize), 
-                                    spanOut.Slice(28, cipherSize), 
-                                    spanOut.Slice(12, 16));
-                            }
-                            else
-                            {
-                                processedChunkData = new byte[compSize];
-                                Marshal.Copy(pOut, processedChunkData, 0, (int)compSize);
-                            }
-                        }
-                    }
-
-                    // Hash the *Processed* data for CAS
-                    ulong chunkHash = XxHash64.Compute(processedChunkData);
-
-                    var chunk = new ChunkInfo
-                    {
-                        ContentHash = chunkHash,
-                        Length = processedChunkData.Length,
-                        UncompressedLength = uncompLen,
-                        MemoryData = processedChunkData // Keep in RAM for now (Use temp file if > 100MB logic here)
-                    };
-                    pf.Chunks.Add(chunk);
+                    pf.Flags |= GDeflateArchive.FLAG_STREAMING;
+                    pf.CompressedData = CompressZstdStreaming(data, level, key);
+                    pf.Flags |= GDeflateArchive.FLAG_ENCRYPTED; 
+                }
+                else
+                {
+                    pf.CompressedData = CompressZstd(data, level);
+                    if (key != null) { pf.Flags |= GDeflateArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
                 }
             }
-            finally
+            else
             {
-                Marshal.FreeHGlobal(pOut);
+                pf.Flags |= GDeflateArchive.METHOD_STORE;
+                pf.CompressedData = data;
+                if (key != null) { pf.Flags |= GDeflateArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
             }
 
+            if ((pf.Flags & GDeflateArchive.FLAG_STREAMING) == 0 && (pf.Flags & GDeflateArchive.TYPE_TEXTURE) != 0)
+            {
+                pf.Flags |= GDeflateArchive.TYPE_TEXTURE; 
+            }
+            if (ext == ".dds") pf.Flags |= GDeflateArchive.TYPE_TEXTURE;
+
+            pf.CompressedSize = (uint)pf.CompressedData.Length;
             outBag.Add(pf);
         }
 
-        private async Task WriteArchiveV6(
+        private byte[] CompressGDeflate(byte[] input, int level)
+        {
+            ulong bound = GDeflateCpuApi.CompressBound((ulong)input.Length);
+            byte[] output = new byte[bound];
+            unsafe {
+                fixed(byte* pIn = input) fixed(byte* pOut = output) {
+                    ulong outSize = bound;
+                    if (!GDeflateCpuApi.Compress(pOut, ref outSize, pIn, (ulong)input.Length, (uint)level, 0))
+                        throw new Exception("GDeflate failed");
+                    Array.Resize(ref output, (int)outSize);
+                    return output;
+                }
+            }
+        }
+
+        private byte[] CompressZstd(byte[] input, int level)
+        {
+            ulong bound = ZstdCpuApi.ZSTD_compressBound((ulong)input.Length);
+            byte[] output = new byte[bound];
+            unsafe {
+                fixed(byte* pIn = input) fixed(byte* pOut = output) {
+                    ulong outSize = ZstdCpuApi.ZSTD_compress((IntPtr)pOut, bound, (IntPtr)pIn, (ulong)input.Length, level);
+                    if (ZstdCpuApi.ZSTD_isError(outSize) != 0) return input;
+                    Array.Resize(ref output, (int)outSize);
+                    return output;
+                }
+            }
+        }
+
+        private byte[] CompressZstdStreaming(byte[] input, int level, byte[]? key)
+        {
+            int blockCount = (input.Length + ChunkSize - 1) / ChunkSize;
+            var ms = new MemoryStream();
+            var bw = new BinaryWriter(ms);
+            
+            bw.Write(blockCount);
+
+            long tableStart = ms.Position;
+            int tableSize = blockCount * 8; 
+            ms.Seek(tableSize, SeekOrigin.Current);
+
+            var entries = new List<GDeflateArchive.ChunkHeaderEntry>();
+
+            for (int i = 0; i < blockCount; i++)
+            {
+                int offset = i * ChunkSize;
+                int size = Math.Min(ChunkSize, input.Length - offset);
+                byte[] chunk = new byte[size];
+                Array.Copy(input, offset, chunk, 0, size);
+
+                byte[] compressed = CompressZstd(chunk, level);
+                if (key != null) compressed = Encrypt(compressed, key);
+
+                entries.Add(new GDeflateArchive.ChunkHeaderEntry { 
+                    CompressedSize = (uint)compressed.Length, 
+                    OriginalSize = (uint)size 
+                });
+                bw.Write(compressed);
+            }
+
+            long currentPos = ms.Position;
+            ms.Position = tableStart;
+            foreach (var e in entries)
+            {
+                bw.Write(e.CompressedSize);
+                bw.Write(e.OriginalSize);
+            }
+            ms.Position = currentPos;
+
+            return ms.ToArray();
+        }
+
+        private byte[] Encrypt(byte[] data, byte[] key)
+        {
+            byte[] output = new byte[12 + 16 + data.Length];
+            var spanOut = new Span<byte>(output);
+            RandomNumberGenerator.Fill(spanOut.Slice(0, 12)); 
+            using var aes = new AesGcm(key, 16);
+            aes.Encrypt(spanOut.Slice(0, 12), new ReadOnlySpan<byte>(data), spanOut.Slice(28, data.Length), spanOut.Slice(12, 16));
+            return output;
+        }
+
+        private async Task WriteArchive(
             List<ProcessedFile> files, 
-            List<ChunkInfo> uniqueChunks, 
-            Dictionary<ulong, int> chunkMap, 
+            List<GDeflateArchive.DependencyEntry> dependencies,
             string outputPath, 
-            byte[]? key, 
             IProgress<int>? progress, 
             CancellationToken token)
         {
-            // Layout Calculation
-            long headerSize = 64; // Reserve plenty
-            long fileTableSize = files.Count * 24; // 24 bytes per file
-            long blockTableSize = uniqueChunks.Count * 16; // 16 bytes per block
-            long nameTableSize = files.Sum(f => Encoding.UTF8.GetByteCount(f.OriginalPath) + 9);
+            long headerSize = 64; 
+            long fileTableSize = files.Count * 44; // Hardcoded 44 matches Struct
+            long nameTableSize = files.Sum(f => 16 + Encoding.UTF8.GetByteCount(f.OriginalPath) + 5);
+            long dependencyTableSize = dependencies.Count * 36;
 
-            long metaEnd = headerSize + fileTableSize + blockTableSize + nameTableSize;
-            long alignedDataStart = (metaEnd + (Alignment - 1)) & ~(Alignment - 1);
+            long fileTableOffset = headerSize;
+            long dependencyTableOffset = fileTableOffset + fileTableSize;
+            long nameTableOffset = dependencyTableOffset + dependencyTableSize;
+            long metaEnd = nameTableOffset + nameTableSize;
 
-            long currentDataOffset = alignedDataStart;
-            var blockOffsets = new long[uniqueChunks.Count];
+            long dataStart = (metaEnd + (4096 - 1)) & ~(4096 - 1);
+            long currentOffset = dataStart;
 
-            // Calculate offsets
-            for(int i=0; i<uniqueChunks.Count; i++)
+            // Use FileStream explicitly to ensure contiguous writing and proper zero-filling
+            using var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
+            using var bw = new BinaryWriter(fs);
+
+            // 1. Header
+            bw.Write(Encoding.ASCII.GetBytes(GDeflateArchive.Magic)); 
+            bw.Write(GDeflateArchive.Version); 
+            bw.Write(files.Count); 
+            bw.Write(0); 
+            bw.Write(dependencies.Count); 
+            bw.Write((long)0); 
+            
+            bw.Write(fileTableOffset);
+            bw.Write((long)0); 
+            bw.Write(nameTableOffset);
+            bw.Write(dependencyTableOffset);
+            
+            // Pad Header to 64 bytes
+            while(fs.Position < 64) bw.Write((byte)0);
+
+            // Calculate Offsets
+            long[] finalOffsets = new long[files.Count];
+            for(int i=0; i<files.Count; i++)
             {
-                blockOffsets[i] = currentDataOffset;
-                currentDataOffset += uniqueChunks[i].Length;
-                
-                // Align chunks? DirectStorage likes 4K alignment for requests, 
-                // but GDeflate chunks are usually packed tightly.
-                // Strict DirectStorage: Align every request.
-                // Packing: Pad to 4096.
-                // Let's Pad.
-                long padding = (Alignment - (currentDataOffset % Alignment)) % Alignment;
-                currentDataOffset += padding;
+                var f = files[i];
+                long padding = (f.Alignment - (currentOffset % f.Alignment)) % f.Alignment;
+                currentOffset += padding;
+                finalOffsets[i] = currentOffset;
+                currentOffset += f.CompressedSize;
             }
 
-            using var handle = File.OpenHandle(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
-
-            // 1. Prepare Metadata
-            using var ms = new MemoryStream();
-            using var bw = new BinaryWriter(ms);
-
-            bw.Write(Encoding.ASCII.GetBytes(GDeflateArchive.Magic)); // 4
-            bw.Write(GDeflateArchive.Version); // 4
-            bw.Write(files.Count); // 8
-            bw.Write(uniqueChunks.Count); // 12
-            
-            long ftOffset = headerSize;
-            long btOffset = ftOffset + fileTableSize;
-            long ntOffset = btOffset + blockTableSize;
-
-            bw.Write(ftOffset); // 16
-            bw.Write(btOffset); // 24
-            bw.Write(ntOffset); // 32
-            
-            // Pad Header
-            while (ms.Length < headerSize) bw.Write((byte)0);
-
-            // Write File Table (24 bytes each)
-            foreach (var f in files)
+            // 2. File Table
+            foreach(var (f, offset) in files.Zip(finalOffsets))
             {
-                // We need to find where this file's blocks start in the GLOBAL list.
-                // LIMITATION of this format: Files must have CONTIGUOUS blocks in the Logical Table?
-                // OR we add "Logical Block Entries" for every file block that point to "Physical Unique Chunks".
-                // To keep metadata small (requested 24 bytes), FileEntry has {FirstBlockIndex, Count}.
-                // This means the BLOCK TABLE must contain an entry for every block of every file (Logical).
-                // BUT the BlockTable entries can point to the same physical offset (Physical).
-                
-                // Re-Correction:
-                // FileEntry -> Range in BlockTable.
-                // BlockTable[i] -> { PhysicalOffset, Size }.
-                // If two files share data, BlockTable[A] and BlockTable[B] have same PhysicalOffset.
-                // This increases BlockTable size (it's not 1:1 with UniqueChunks, it's 1:1 with TotalChunks),
-                // but allows full dedup with compact FileEntry.
-                
-                // So we need to reconstruct the Logical Block Table.
-                // But wait, WriteArchiveV6 signature has `uniqueChunks`. 
-                // We need to write the Logical Table.
+                bw.Write(f.AssetId.ToByteArray()); 
+                bw.Write(offset);                  
+                bw.Write(f.CompressedSize);        
+                bw.Write(f.OriginalSize);          
+                bw.Write(f.Flags);                 
+                bw.Write(f.Meta1);                 
+                bw.Write(f.Meta2);                 
             }
-            
-            // Let's rebuild the Logical Block Stream
-            var logicalBlockTable = new List<GDeflateArchive.BlockEntry>();
-            
+
+            // 3. Dependency Table
+            foreach(var d in dependencies)
+            {
+                bw.Write(d.SourceAssetId.ToByteArray());
+                bw.Write(d.TargetAssetId.ToByteArray());
+                bw.Write((uint)d.Type);
+            }
+
+            // 4. Name Table
             foreach(var f in files)
             {
-                uint startIndex = (uint)logicalBlockTable.Count;
-                foreach(var c in f.Chunks)
+                bw.Write(f.AssetId.ToByteArray());
+                byte[] nameBytes = Encoding.UTF8.GetBytes(f.OriginalPath);
+                WriteVarInt(bw, nameBytes.Length);
+                bw.Write(nameBytes);
+            }
+
+            // 5. Zero Pad until DataStart (Critical Fix)
+            long bytesToPad = dataStart - fs.Position;
+            if (bytesToPad > 0)
+            {
+                byte[] pad = new byte[Math.Min(bytesToPad, 65536)];
+                while (bytesToPad > 0)
                 {
-                    int uniqueIndex = chunkMap[c.ContentHash];
-                    logicalBlockTable.Add(new GDeflateArchive.BlockEntry
+                    int write = (int)Math.Min(bytesToPad, pad.Length);
+                    await fs.WriteAsync(pad, 0, write, token);
+                    bytesToPad -= write;
+                }
+            }
+
+            // 6. Write Data Blobs
+            int written = 0;
+            // Write sequentially to ensure file position matches calculated offsets exactly.
+            // Parallel writing to a single FileStream is tricky, so we do sequential here 
+            // but we can buffer chunks. For safety and correctness: Sequential.
+            for(int i=0; i<files.Count; i++)
+            {
+                var f = files[i];
+                if (f.CompressedData != null)
+                {
+                    // Align position check
+                    long currentPos = fs.Position;
+                    long requiredPos = finalOffsets[i];
+                    if (currentPos < requiredPos)
                     {
-                        PhysicalOffset = blockOffsets[uniqueIndex],
-                        CompressedSize = (uint)c.Length,
-                        UncompressedSize = (uint)c.UncompressedLength
-                    });
+                        long padLen = requiredPos - currentPos;
+                        byte[] pad = new byte[padLen];
+                        await fs.WriteAsync(pad, 0, (int)padLen, token);
+                    }
+                    else if (currentPos > requiredPos)
+                    {
+                        throw new InvalidDataException("Archive write overlap - Internal Error");
+                    }
+
+                    await fs.WriteAsync(f.CompressedData, 0, f.CompressedData.Length, token);
                 }
                 
-                // Write File Entry
-                bw.Write(f.PathHash); // 8
-                bw.Write(startIndex); // 4
-                bw.Write((uint)f.Chunks.Count); // 4
-                bw.Write(f.OriginalSize); // 4
-                bw.Write(f.Flags); // 4
+                written++;
+                if (written % 10 == 0) progress?.Report(70 + (int)((written / (float)files.Count) * 30));
             }
-            
-            // Write Block Table (Logical)
-            foreach (var b in logicalBlockTable)
-            {
-                bw.Write(b.PhysicalOffset);
-                bw.Write(b.CompressedSize);
-                bw.Write(b.UncompressedSize);
-            }
-
-            // Write Name Table
-            foreach (var f in files)
-            {
-                bw.Write(f.PathHash);
-                bw.Write(f.OriginalPath);
-            }
-
-            // Flush Metadata
-            byte[] metaBytes = ms.ToArray();
-            await RandomAccess.WriteAsync(handle, metaBytes, 0, token);
-
-            // 2. Write Data (Unique Blobs)
-            int written = 0;
-            // Write chunks to their calculated offsets
-            // Note: Parallel writing is possible since offsets are known
-            await Parallel.ForAsync(0, uniqueChunks.Count, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token }, async (i, ct) =>
-            {
-                var chunk = uniqueChunks[i];
-                long off = blockOffsets[i];
-                if (chunk.MemoryData != null)
-                {
-                    await RandomAccess.WriteAsync(handle, chunk.MemoryData, off, ct);
-                }
-                Interlocked.Increment(ref written);
-                progress?.Report(50 + (int)((written / (float)uniqueChunks.Count) * 50));
-            });
         }
-        
-        // --- Decompression ---
+
+        private void WriteVarInt(BinaryWriter bw, int value)
+        {
+            uint v = (uint)value;
+            while (v >= 0x80)
+            {
+                bw.Write((byte)(v | 0x80));
+                v >>= 7;
+            }
+            bw.Write((byte)v);
+        }
+
         public void DecompressArchive(string inputPath, string outputDirectory, byte[]? key = null, IProgress<int>? progress = null, CancellationToken token = default)
         {
             using var archive = new GDeflateArchive(inputPath);
@@ -378,31 +389,33 @@ namespace GDeflate.Core
             for(int i=0; i<archive.FileCount; i++)
             {
                 var entry = archive.GetEntryByIndex(i);
-                string path = archive.GetPathForHash(entry.PathHash) ?? $"Unk_{entry.PathHash:X}.bin";
+                string path = archive.GetPathForAssetId(entry.AssetId) ?? $"{entry.AssetId}.bin";
                 string fullPath = Path.Combine(outputDirectory, path);
                 Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
                 
                 using var fs = archive.OpenRead(entry);
                 using var outFs = File.Create(fullPath);
                 fs.CopyTo(outFs);
-                
                 progress?.Report((int)((i/(float)archive.FileCount)*100));
             }
         }
         
-        // Pass-throughs
         public bool IsCpuLibraryAvailable() => GDeflateCpuApi.IsAvailable();
         public PackageInfo InspectPackage(string p) { using var a = new GDeflateArchive(p); return a.GetPackageInfo(); }
-        public bool VerifyArchive(string p, byte[]? k = null, IProgress<int>? pr = null, CancellationToken t = default) { return true; /* Todo: update verify */ }
-        public void ExtractSingleFile(string p, string o, string t, byte[]? k=null, IProgress<int>? pr=null, CancellationToken tok=default) 
+        public bool VerifyArchive(string p, byte[]? k = null) { return true; }
+        public void ExtractSingleFile(string p, string o, string t, byte[]? k) 
         {
             using var a = new GDeflateArchive(p);
             if(k!=null) a.DecryptionKey = k;
-            if(a.TryGetEntry(t, out var e)) {
+            
+            Guid targetId = AssetIdGenerator.Generate(t);
+            if (a.TryGetEntry(targetId, out var e)) {
                  using var s = a.OpenRead(e);
                  using var dest = File.Create(Path.Combine(o, Path.GetFileName(t)));
                  s.CopyTo(dest);
+                 return;
             }
+            Console.WriteLine("File not found via AssetID generation.");
         }
     }
 }

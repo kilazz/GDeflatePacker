@@ -7,7 +7,8 @@ namespace GDeflateGUI
     public class FileItem
     {
         // --- Common ---
-        public string RelativePath { get; set; } = string.Empty; // e.g. "textures/hero.png"
+        public string RelativePath { get; set; } = string.Empty;
+        public Guid AssetId { get; set; } // v8 GUID
         public string Size { get; set; } = string.Empty;
         
         // --- Disk Mode (Source for packing) ---
@@ -15,37 +16,42 @@ namespace GDeflateGUI
 
         // --- Archive Mode (View/Extract) ---
         public bool IsArchiveEntry { get; set; } = false;
-        public GDeflateArchive? SourceArchive { get; set; } // Reference to keep the archive open
+        public GDeflateArchive? SourceArchive { get; set; } 
         public GDeflateArchive.FileEntry? EntryInfo { get; set; }
-        
+        public long CompressedSizeBytes { get; set; }
+        public string ManifestInfo { get; set; } = "";
+
         // --- UI Helpers ---
         public string TypeIcon => IsArchiveEntry ? "📦" : "📄";
         
+        public string DisplayName 
+        {
+            get 
+            {
+                if (IsArchiveEntry) return $"{RelativePath}\n[{AssetId}]";
+                return RelativePath;
+            }
+        }
+
         public string CompressionInfo 
         {
             get
             {
-                if (!IsArchiveEntry || !EntryInfo.HasValue) return "Ready to Pack";
-                return GetCompressionLabel(EntryInfo.Value);
+                if (!IsArchiveEntry || !EntryInfo.HasValue) return "Pending";
+                var e = EntryInfo.Value;
+                
+                uint method = e.Flags & GDeflateArchive.MASK_METHOD;
+                string m = method switch
+                {
+                    GDeflateArchive.METHOD_GDEFLATE => "GDeflate (GPU)",
+                    GDeflateArchive.METHOD_ZSTD => "Zstd (CPU)",
+                    _ => "Store"
+                };
+
+                if (e.OriginalSize == 0) return m;
+                double ratio = (double)CompressedSizeBytes / e.OriginalSize * 100.0;
+                return $"{m}\n{ratio:F0}%";
             }
-        }
-
-        private static string GetCompressionLabel(GDeflateArchive.FileEntry e)
-        {
-            if ((e.Flags & GDeflateArchive.FLAG_IS_COMPRESSED) == 0) return "Store (Raw)";
-            
-            uint method = e.Flags & GDeflateArchive.MASK_COMPRESSION_METHOD;
-            string m = method switch
-            {
-                GDeflateArchive.METHOD_GDEFLATE => "GDeflate (GPU)",
-                GDeflateArchive.METHOD_DEFLATE => "Deflate (CPU)",
-                GDeflateArchive.METHOD_ZSTD => "Zstd",
-                _ => "Unknown"
-            };
-
-            // Calculate ratio
-            double ratio = (double)e.CompressedSize / e.OriginalSize * 100.0;
-            return $"{m} ({ratio:F0}%)";
         }
     }
 }

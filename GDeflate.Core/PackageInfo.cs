@@ -11,19 +11,19 @@ namespace GDeflate.Core
         public int FileCount { get; set; }
         public long TotalSize { get; set; }
         public bool HasDebugNames { get; set; }
+        public int DependencyCount { get; set; }
         public List<PackageEntryInfo> Entries { get; set; } = new List<PackageEntryInfo>();
     }
 
     public class PackageEntryInfo
     {
         public string Path { get; set; } = string.Empty;
-        public ulong PathHash { get; set; }
+        public Guid AssetId { get; set; } // v8 GUID
         public long Offset { get; set; }
         public long OriginalSize { get; set; }
         public long CompressedSize { get; set; }
-        public uint Crc32 { get; set; }
-        public int ChunkCount { get; set; }
-        public bool Is4KAligned { get; set; }
+        public long Alignment { get; set; }
         public string Method { get; set; } = "Store";
+        public string MetadataInfo { get; set; } = ""; // e.g. "2048x2048 Mips:12"
     }
 }
