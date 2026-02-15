@@ -5,13 +5,13 @@ using System.Runtime.InteropServices;
 
 namespace GPCK.Core
 {
-    public static class GDeflateCodec
+    public static class CodecGDeflate
     {
         private const string DllName = "GDeflate.dll";
 
-        static GDeflateCodec()
+        static CodecGDeflate()
         {
-            NativeLibrary.SetDllImportResolver(typeof(GDeflateCodec).Assembly, CustomDllResolver);
+            NativeLibrary.SetDllImportResolver(typeof(CodecGDeflate).Assembly, CustomDllResolver);
         }
 
         private static IntPtr CustomDllResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
@@ -32,7 +32,7 @@ namespace GPCK.Core
 
         public static bool IsAvailable()
         {
-            return NativeLibrary.TryLoad(DllName, typeof(GDeflateCodec).Assembly, null, out IntPtr handle) && handle != IntPtr.Zero;
+            return NativeLibrary.TryLoad(DllName, typeof(CodecGDeflate).Assembly, null, out IntPtr handle) && handle != IntPtr.Zero;
         }
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompressBound")]

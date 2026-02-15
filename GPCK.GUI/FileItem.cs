@@ -45,6 +45,7 @@ namespace GPCKGUI
                 {
                     GameArchive.METHOD_GDEFLATE => "GDeflate (GPU)",
                     GameArchive.METHOD_ZSTD => "Zstd (CPU)",
+                    GameArchive.METHOD_LZ4 => "LZ4 (Fast)",
                     _ => "Store"
                 };
 

@@ -19,6 +19,15 @@ namespace GPCK.Core
         private const int GpuAlignment = 4096;
         private const long LargeFileThreshold = 250 * 1024 * 1024; // 250MB threshold for streaming
 
+        public enum CompressionMethod
+        {
+            Auto,
+            Store,
+            GDeflate,
+            Zstd,
+            LZ4
+        }
+
         private class ProcessedFile
         {
             public Guid AssetId;
@@ -63,16 +72,19 @@ namespace GPCK.Core
             bool enableMipSplit,
             List<DependencyDefinition>? dependencies,
             IProgress<int>? progress, 
-            CancellationToken token)
+            CancellationToken token,
+            CompressionMethod forceMethod = CompressionMethod.Auto)
         {
-            GDeflateCodec.IsAvailable(); 
-            bool zstdAvailable = ZstdCodec.IsAvailable();
+            CodecGDeflate.IsAvailable(); 
+            bool zstdAvailable = CodecZstd.IsAvailable();
+            bool lz4Available = CodecLZ4.IsAvailable();
+
             var processedFiles = new ConcurrentBag<ProcessedFile>();
             int processedCount = 0;
             
             await Parallel.ForEachAsync(fileMap, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2), CancellationToken = token }, async (kvp, ct) =>
             {
-                await ProcessFile(kvp.Key, kvp.Value, level, key, enableMipSplit, zstdAvailable, processedFiles, ct);
+                await ProcessFile(kvp.Key, kvp.Value, level, key, enableMipSplit, zstdAvailable, lz4Available, forceMethod, processedFiles, ct);
                 int c = Interlocked.Increment(ref processedCount);
                 progress?.Report((int)((c / (float)fileMap.Count) * 80));
             });
@@ -88,7 +100,17 @@ namespace GPCK.Core
             await WriteArchive(sortedFiles, depEntries, outputPath, enableDedup, progress, token);
         }
 
-        private async Task ProcessFile(string inputPath, string relPath, int level, byte[]? key, bool mipSplit, bool zstdAvailable, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
+        private async Task ProcessFile(
+            string inputPath, 
+            string relPath, 
+            int level, 
+            byte[]? key, 
+            bool mipSplit, 
+            bool zstdAvailable, 
+            bool lz4Available,
+            CompressionMethod forceMethod,
+            ConcurrentBag<ProcessedFile> outBag, 
+            CancellationToken ct)
         {
             var info = new FileInfo(inputPath);
             long fileSize = info.Length;
@@ -96,18 +118,15 @@ namespace GPCK.Core
             // Check for large files to use streaming mode
             bool isLargeFile = fileSize >= LargeFileThreshold;
             
+            // Streaming currently only supports ZSTD logic in this impl
             if (isLargeFile && !zstdAvailable)
             {
-                // Fallback to store if Zstd not available, but don't read all to memory
-                // Note: Implementing true "Store Streaming" for big files would be separate logic.
-                // For now, we assume Zstd is present for big files or we fail memory check.
-                if (fileSize > int.MaxValue - 1024) throw new NotSupportedException($"File too large and Zstd not available: {relPath}");
+                 if (fileSize > int.MaxValue - 1024) throw new NotSupportedException($"File too large and Zstd not available: {relPath}");
             }
 
-            if (isLargeFile && zstdAvailable)
+            if (isLargeFile && zstdAvailable && (forceMethod == CompressionMethod.Auto || forceMethod == CompressionMethod.Zstd))
             {
                 // STREAMING PATH (Chunked Compression)
-                // This avoids loading 2GB+ into RAM.
                 using var fs = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.SequentialScan);
                 byte[] streamedBlob = await CompressZstdStreamingAsync(fs, fileSize, level, key, ct);
                 
@@ -116,7 +135,7 @@ namespace GPCK.Core
                     AssetId = AssetIdGenerator.Generate(relPath),
                     OriginalPath = relPath, 
                     OriginalSize = (uint)fileSize,
-                    StreamingData = streamedBlob, // This blob is still in memory, but compressed. 
+                    StreamingData = streamedBlob, 
                     Alignment = DefaultAlignment,
                     Flags = GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_ZSTD | GameArchive.FLAG_STREAMING
                 };
@@ -133,7 +152,7 @@ namespace GPCK.Core
                 return;
             }
 
-            // STANDARD PATH (Small/Medium files)
+            // STANDARD PATH
             byte[] fileBuffer = ArrayPool<byte>.Shared.Rent((int)fileSize);
             
             try 
@@ -145,7 +164,31 @@ namespace GPCK.Core
                 
                 var dataSpan = new Span<byte>(fileBuffer, 0, (int)fileSize);
                 string ext = Path.GetExtension(inputPath).ToLowerInvariant();
-                bool useGDeflate = ext == ".dds" || ext == ".model" || ext == ".geom";
+                
+                // Determine Method
+                bool useGDeflate = false;
+                bool useZstd = false;
+                bool useLz4 = false;
+
+                if (forceMethod == CompressionMethod.Auto)
+                {
+                    useGDeflate = ext == ".dds" || ext == ".model" || ext == ".geom";
+                    if (!useGDeflate) useZstd = zstdAvailable;
+                }
+                else
+                {
+                    switch(forceMethod)
+                    {
+                        case CompressionMethod.GDeflate: useGDeflate = true; break;
+                        case CompressionMethod.Zstd: useZstd = true; break;
+                        case CompressionMethod.LZ4: useLz4 = true; break;
+                        case CompressionMethod.Store: break;
+                    }
+                }
+
+                // Fallback checks
+                if (useZstd && !zstdAvailable) { useZstd = false; }
+                if (useLz4 && !lz4Available) { useLz4 = false; } // Fallback to store
                 
                 uint m1 = 0, m2 = 0;
                 int tailSize = 0;
@@ -189,18 +232,24 @@ namespace GPCK.Core
                     pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_GDEFLATE;
                     pf.CompressedData = CompressGDeflate(processingBuffer, level);
                 }
-                else if (zstdAvailable) 
+                else if (useZstd) 
                 {
                     pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_ZSTD;
                     pf.CompressedData = CompressZstd(processingBuffer, level);
-                    if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
+                }
+                else if (useLz4)
+                {
+                    pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_LZ4;
+                    pf.CompressedData = CompressLZ4(processingBuffer, level);
                 }
                 else
                 {
                     pf.Flags |= GameArchive.METHOD_STORE;
                     pf.CompressedData = processingBuffer; 
-                    if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
                 }
+
+                // Encryption applies to result
+                if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
 
                 if (tailSize > 0 || ext == ".dds") pf.Flags |= GameArchive.TYPE_TEXTURE;
                 pf.CompressedSize = (uint)pf.CompressedData.Length;
@@ -218,12 +267,12 @@ namespace GPCK.Core
 
         private byte[] CompressGDeflate(byte[] input, int level)
         {
-            ulong bound = GDeflateCodec.CompressBound((ulong)input.Length);
+            ulong bound = CodecGDeflate.CompressBound((ulong)input.Length);
             byte[] output = new byte[bound];
             unsafe {
                 fixed(byte* pIn = input) fixed(byte* pOut = output) {
                     ulong outSize = bound;
-                    if (!GDeflateCodec.Compress(pOut, ref outSize, pIn, (ulong)input.Length, (uint)level, 0)) throw new Exception("GDeflate failed");
+                    if (!CodecGDeflate.Compress(pOut, ref outSize, pIn, (ulong)input.Length, (uint)level, 0)) throw new Exception("GDeflate failed");
                     Array.Resize(ref output, (int)outSize);
                     return output;
                 }
@@ -232,13 +281,32 @@ namespace GPCK.Core
 
         private byte[] CompressZstd(byte[] input, int level)
         {
-            ulong bound = ZstdCodec.ZSTD_compressBound((ulong)input.Length);
+            ulong bound = CodecZstd.ZSTD_compressBound((ulong)input.Length);
             byte[] output = new byte[bound];
             unsafe {
                 fixed(byte* pIn = input) fixed(byte* pOut = output) {
-                    ulong outSize = ZstdCodec.ZSTD_compress((IntPtr)pOut, bound, (IntPtr)pIn, (ulong)input.Length, level);
-                    if (ZstdCodec.ZSTD_isError(outSize) != 0) return input;
+                    ulong outSize = CodecZstd.ZSTD_compress((IntPtr)pOut, bound, (IntPtr)pIn, (ulong)input.Length, level);
+                    if (CodecZstd.ZSTD_isError(outSize) != 0) return input;
                     Array.Resize(ref output, (int)outSize);
+                    return output;
+                }
+            }
+        }
+
+        private byte[] CompressLZ4(byte[] input, int level)
+        {
+            int bound = CodecLZ4.LZ4_compressBound(input.Length);
+            byte[] output = new byte[bound];
+            unsafe {
+                fixed(byte* pIn = input) fixed(byte* pOut = output) {
+                    int outSize;
+                    if (level < 3)
+                        outSize = CodecLZ4.LZ4_compress_default((IntPtr)pIn, (IntPtr)pOut, input.Length, bound);
+                    else 
+                        outSize = CodecLZ4.LZ4_compress_HC((IntPtr)pIn, (IntPtr)pOut, input.Length, bound, level); // HC uses level 3-12
+
+                    if (outSize <= 0) return input; // Fail or larger
+                    Array.Resize(ref output, outSize);
                     return output;
                 }
             }
@@ -249,9 +317,6 @@ namespace GPCK.Core
             // Calculate chunks
             int blockCount = (int)((totalSize + ChunkSize - 1) / ChunkSize);
             
-            // We write the result to a MemoryStream. 
-            // Warning: For EXTREMELY large files (10GB+), even the compressed blob shouldn't be in memory.
-            // But for 200MB-2GB files, holding the compressed version (e.g. 500MB) is acceptable for this tool.
             using var ms = new MemoryStream();
             using var bw = new BinaryWriter(ms);
             
@@ -272,17 +337,15 @@ namespace GPCK.Core
                     if (read == 0) break;
                     
                     byte[] chunkData;
-                    // Shrink if last block
                     if (read < ChunkSize) {
                         chunkData = new byte[read];
                         Array.Copy(chunkBuffer, chunkData, read);
                     } else {
-                         chunkData = chunkBuffer; // careful with size passed to compress
+                         chunkData = chunkBuffer; 
                     }
                     
-                    // Compress Chunk
                     byte[] compressed;
-                    if (read == ChunkSize) compressed = CompressZstd(chunkBuffer, level); // CompressZstd handles sizing
+                    if (read == ChunkSize) compressed = CompressZstd(chunkBuffer, level);
                     else compressed = CompressZstd(chunkData, level);
 
                     if (key != null) compressed = Encrypt(compressed, key);
@@ -331,9 +394,10 @@ namespace GPCK.Core
             byte[]? key = null, 
             bool enableMipSplit = false, 
             IProgress<int>? progress = null, 
-            CancellationToken token = default)
+            CancellationToken token = default,
+            CompressionMethod method = CompressionMethod.Auto)
         {
-            CompressFilesToArchiveAsync(fileMap, outputPath, enableDedup, level, key, enableMipSplit, null, progress, token).GetAwaiter().GetResult();
+            CompressFilesToArchiveAsync(fileMap, outputPath, enableDedup, level, key, enableMipSplit, null, progress, token, method).GetAwaiter().GetResult();
         }
 
         private async Task WriteArchive(List<ProcessedFile> files, List<GameArchive.DependencyEntry> dependencies, string outputPath, bool enableDedup, IProgress<int>? progress, CancellationToken token)
@@ -496,7 +560,7 @@ namespace GPCK.Core
             });
         }
         
-        public bool IsCpuLibraryAvailable() => GDeflateCodec.IsAvailable();
+        public bool IsCpuLibraryAvailable() => CodecGDeflate.IsAvailable();
         public PackageInfo InspectPackage(string p) { using var a = new GameArchive(p); return a.GetPackageInfo(); }
         
         public bool VerifyArchive(string p, byte[]? k = null) 

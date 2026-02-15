@@ -128,13 +128,18 @@ namespace GPCK.Core
                     {
                         if (_method == GameArchive.METHOD_GDEFLATE)
                         {
-                            if (!GDeflateCodec.Decompress((void*)destination, (ulong)size, pSrc, (ulong)dataToDecompress.Length, 1))
+                            if (!CodecGDeflate.Decompress((void*)destination, (ulong)size, pSrc, (ulong)dataToDecompress.Length, 1))
                                 throw new IOException("GDeflate Decompression Failed");
                         }
                         else if (_method == GameArchive.METHOD_ZSTD)
                         {
-                            ulong res = ZstdCodec.ZSTD_decompress(destination, (ulong)size, (IntPtr)pSrc, (ulong)dataToDecompress.Length);
-                            if (ZstdCodec.ZSTD_isError(res) != 0) throw new IOException("Zstd Decompression Failed");
+                            ulong res = CodecZstd.ZSTD_decompress(destination, (ulong)size, (IntPtr)pSrc, (ulong)dataToDecompress.Length);
+                            if (CodecZstd.ZSTD_isError(res) != 0) throw new IOException("Zstd Decompression Failed");
+                        }
+                        else if (_method == GameArchive.METHOD_LZ4)
+                        {
+                            int res = CodecLZ4.LZ4_decompress_safe((IntPtr)pSrc, destination, dataToDecompress.Length, (int)size);
+                            if (res < 0) throw new IOException("LZ4 Decompression Failed");
                         }
                     }
                 }

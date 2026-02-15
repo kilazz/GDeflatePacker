@@ -98,6 +98,7 @@ namespace GPCKGUI
                         var color = Brushes.LightGray;
                         if (entry.Method.Contains("GDeflate")) color = Brushes.LightGreen;
                         else if (entry.Method.Contains("Zstd")) color = Brushes.LightBlue;
+                        else if (entry.Method.Contains("LZ4")) color = Brushes.Orange;
                         
                         _blocks.Add(new BlockItem 
                         { 
@@ -240,12 +241,16 @@ namespace GPCKGUI
             var filesToPack = _files.Where(x => !x.IsArchiveEntry).DistinctBy(x => x.FilePath).ToDictionary(x => x.FilePath, x => x.RelativePath);
             if (filesToPack.Count == 0) return;
 
+            // Get method from UI
+            string sel = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
+            AssetPacker.CompressionMethod method = Enum.Parse<AssetPacker.CompressionMethod>(sel);
+
             var saveDialog = new SaveFileDialog { Filter = "Game Package (*.gpck)|*.gpck", FileName = "assets.gpck" };
             if (saveDialog.ShowDialog() == true)
             {
                 await RunOperationAsync(async (token, progress) =>
                 {
-                    await Task.Run(() => _processor.CompressFilesToArchive(filesToPack, saveDialog.FileName, progress: progress, token: token));
+                    await Task.Run(() => _processor.CompressFilesToArchive(filesToPack, saveDialog.FileName, progress: progress, token: token, method: method));
                 }, BtnCompress, "🚀 Pack");
             }
         }

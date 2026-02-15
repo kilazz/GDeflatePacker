@@ -7,7 +7,7 @@ namespace GPCK.Core
     /// Native wrapper for Zstandard (libzstd.dll).
     /// Used for high-ratio CPU compression of non-GPU assets (Scripts, JSON, Physics).
     /// </summary>
-    public static class ZstdCodec
+    public static class CodecZstd
     {
         private const string DllName = "libzstd.dll";
 

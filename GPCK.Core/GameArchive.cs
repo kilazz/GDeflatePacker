@@ -11,8 +11,8 @@ namespace GPCK.Core
     public class GameArchive : IDisposable
     {
         public const int Version = 1;
-        public const string MagicStr = "GPCK"; 
-        private const int FileEntrySize = 44; 
+        public const string MagicStr = "GPCK";
+        private const int FileEntrySize = 44;
 
         private readonly MemoryMappedFile _mmf;
         private readonly MemoryMappedViewAccessor _view;
@@ -44,16 +44,16 @@ namespace GPCK.Core
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct FileEntry
         {
-            public Guid AssetId;            
-            public long DataOffset;         
-            public uint CompressedSize;     
-            public uint OriginalSize;       
-            public uint Flags;              
-            public uint Meta1;          
-            public uint Meta2;          
+            public Guid AssetId;
+            public long DataOffset;
+            public uint CompressedSize;
+            public uint OriginalSize;
+            public uint Flags;
+            public uint Meta1;
+            public uint Meta2;
         }
 
-        public enum DependencyType : uint 
+        public enum DependencyType : uint
         {
             HardReference = 0,
             SoftReference = 1,
@@ -63,11 +63,11 @@ namespace GPCK.Core
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct DependencyEntry
         {
-            public Guid SourceAssetId; 
-            public Guid TargetAssetId; 
+            public Guid SourceAssetId;
+            public Guid TargetAssetId;
             public DependencyType Type;
         }
-        
+
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct ChunkHeaderEntry
         {
@@ -76,16 +76,17 @@ namespace GPCK.Core
         }
 
         public const uint FLAG_IS_COMPRESSED = 1 << 0;
-        public const uint FLAG_ENCRYPTED     = 1 << 1; 
-        public const uint MASK_METHOD        = 0x1C; 
+        public const uint FLAG_ENCRYPTED     = 1 << 1;
+        public const uint MASK_METHOD        = 0x1C;
         public const uint METHOD_STORE       = 0 << 2;
-        public const uint METHOD_GDEFLATE    = 1 << 2; 
-        public const uint METHOD_ZSTD        = 2 << 2; 
+        public const uint METHOD_GDEFLATE    = 1 << 2;
+        public const uint METHOD_ZSTD        = 2 << 2;
+        public const uint METHOD_LZ4         = 3 << 2;
         public const uint MASK_TYPE          = 0xE0;
         public const uint TYPE_GENERIC       = 0 << 5;
         public const uint TYPE_TEXTURE       = 1 << 5;
         public const uint TYPE_GEOMETRY      = 2 << 5;
-        public const uint FLAG_STREAMING     = 1 << 8; 
+        public const uint FLAG_STREAMING     = 1 << 8;
         public const uint MASK_ALIGNMENT     = 0xFF000000;
         public const int SHIFT_ALIGNMENT     = 24;
 
@@ -106,7 +107,7 @@ namespace GPCK.Core
 
             _mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
-            
+
             _dataFileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
 
             // Read Header safely
@@ -124,9 +125,9 @@ namespace GPCK.Core
         public FileEntry GetEntryByIndex(int index)
         {
             if (index < 0 || index >= FileCount) throw new IndexOutOfRangeException();
-            
+
             long offset = _header.FileTableOffset + ((long)index * FileEntrySize);
-            
+
             FileEntry entry;
             _view.Read(offset, out entry);
             return entry;
@@ -191,36 +192,36 @@ namespace GPCK.Core
             if (_header.NameTableOffset == 0) return null;
 
             // Safe implementation using View Accessor without raw pointers
-            // Note: This is slower than raw pointers but safer. For production tool, unsafe is fine, 
+            // Note: This is slower than raw pointers but safer. For production tool, unsafe is fine,
             // but for this refactor we prioritize safety.
-            
+
             long ptr = _header.NameTableOffset;
             long end = _view.Capacity;
 
             for (int i = 0; i < FileCount; i++)
             {
-                if (ptr >= end - 16) break; 
-                
+                if (ptr >= end - 16) break;
+
                 // Read Guid
                 byte[] guidBytes = new byte[16];
                 _view.ReadArray(ptr, guidBytes, 0, 16);
                 Guid entryGuid = new Guid(guidBytes);
                 ptr += 16;
-                
+
                 // Read VarInt Length
                 int length = 0;
                 int shift = 0;
                 byte b;
-                do { 
-                    if (ptr >= end) return null; 
+                do {
+                    if (ptr >= end) return null;
                     b = _view.ReadByte(ptr++);
-                    length |= (b & 0x7F) << shift; 
-                    shift += 7; 
+                    length |= (b & 0x7F) << shift;
+                    shift += 7;
                 } while ((b & 0x80) != 0);
 
                 if (ptr + length > end) return null;
 
-                if (entryGuid == id) 
+                if (entryGuid == id)
                 {
                     byte[] strBytes = new byte[length];
                     _view.ReadArray(ptr, strBytes, 0, length);
@@ -257,6 +258,7 @@ namespace GPCK.Core
                 string methodStr = methodMask switch {
                     METHOD_GDEFLATE => "GDeflate",
                     METHOD_ZSTD => "Zstd",
+                    METHOD_LZ4 => "LZ4",
                     _ => "Store"
                 };
                 if ((e.Flags & FLAG_ENCRYPTED) != 0) methodStr += " [Enc]";
