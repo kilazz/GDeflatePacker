@@ -1,4 +1,4 @@
-<Window x:Class="GDeflateGUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Game Asset Browser" Height="720" Width="1200" WindowStartupLocation="CenterScreen" Background="#F9F9F9">
+<Window x:Class="GPCKGUI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="GPCK Asset Browser" Height="720" Width="1200" WindowStartupLocation="CenterScreen" Background="#F9F9F9">
 	<Grid>
 		<Grid.RowDefinitions>
 			<RowDefinition Height="Auto"/>
@@ -11,7 +11,7 @@
 			<DockPanel>
 				<TextBlock x:Name="TxtBackendStatus" DockPanel.Dock="Right" Text="System Check..." Foreground="#888" VerticalAlignment="Center"/>
 				<StackPanel>
-					<TextBlock Text="Game Asset Browser" FontSize="18" FontWeight="Bold" Foreground="#222"/>
+					<TextBlock Text="GPCK Asset Browser" FontSize="18" FontWeight="Bold" Foreground="#222"/>
 					<TextBlock Text="Asset Management System" FontSize="12" Foreground="#888"/>
 				</StackPanel>
 			</DockPanel>

@@ -3,7 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     public static class GDeflateCodec
     {
@@ -19,20 +19,13 @@ namespace GDeflate.Core
             if (libraryName == DllName)
             {
                 string root = AppContext.BaseDirectory;
-
-                // 1. Check root directory
                 string rootPath = Path.Combine(root, DllName);
-                if (File.Exists(rootPath) && NativeLibrary.TryLoad(rootPath, out IntPtr rootHandle))
-                    return rootHandle;
+                if (File.Exists(rootPath) && NativeLibrary.TryLoad(rootPath, out IntPtr rootHandle)) return rootHandle;
 
-                // 2. Check libs subdirectory
                 string libsPath = Path.Combine(root, "libs", DllName);
-                if (File.Exists(libsPath) && NativeLibrary.TryLoad(libsPath, out IntPtr libsHandle))
-                    return libsHandle;
+                if (File.Exists(libsPath) && NativeLibrary.TryLoad(libsPath, out IntPtr libsHandle)) return libsHandle;
 
-                // 3. Fallback to default loading
-                if (NativeLibrary.TryLoad(libraryName, assembly, searchPath, out IntPtr defaultHandle))
-                    return defaultHandle;
+                if (NativeLibrary.TryLoad(libraryName, assembly, searchPath, out IntPtr defaultHandle)) return defaultHandle;
             }
             return IntPtr.Zero;
         }

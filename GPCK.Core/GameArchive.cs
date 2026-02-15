@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Core Game Archive (.gpck).

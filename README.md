@@ -1,4 +1,4 @@
-# Game Asset Browser
+# GPCK Toolsuite
 **Game Package** built on **.NET 10.0**.
 This project provides efficient tools for compressing and decompressing files using Microsoft's [GDeflate](https://github.com/microsoft/DirectStorage/tree/main/GDeflate) algorithm, utilizing direct native memory (`unsafe`) for maximum performance.
 
@@ -12,20 +12,20 @@ This project provides efficient tools for compressing and decompressing files us
 ### CLI
 ```powershell
 # Compress file -> texture.png.gdef
-GDeflateCLI compress texture.png
+GPCK compress texture.png
 
 # Compress folder -> assets.gpck (DirectStorage aligned package)
-GDeflateCLI compress "C:\Assets" assets.gpck
+GPCK compress "C:\Assets" assets.gpck
 
 # Inspect package alignment (DirectStorage check)
-GDeflateCLI info assets.gpck
+GPCK info assets.gpck
 
 # Decompress
-GDeflateCLI decompress assets.gpck "C:\Output"
+GPCK decompress assets.gpck "C:\Output"
 ```
 
 ### GUI
-1.  Launch `GDeflateGUI.exe`.
+1.  Launch `GPCK.GUI.exe`.
 2.  **Drag & Drop** files or folders.
 3.  Select **.gpck** (for folders) or **.gdef** (for single files).
 4.  Click **Start Compression**.

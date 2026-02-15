@@ -1,14 +1,13 @@
-
 using System;
 using System.IO;
 using System.Diagnostics;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using GDeflate.Core;
+using GPCK.Core;
 using System.Threading;
 
-namespace GDeflateCLI
+namespace GPCK.CLI
 {
     class Program
     {
@@ -93,7 +92,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI compress <file/folder> [output] [-l level] [--no-dedup] [--mip-split] [--key secret]");
+                Console.WriteLine("Usage: GPCK compress <file/folder> [output] [-l level] [--no-dedup] [--mip-split] [--key secret]");
                 return;
             }
 
@@ -144,7 +143,7 @@ namespace GDeflateCLI
                 map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
 
             Console.WriteLine($"Target files: {map.Count}");
-            processor.CompressFilesToArchive(map, outputPath, dedup, level, encryptionKey: key, enableMipSplitting: mipSplit);
+            processor.CompressFilesToArchive(map, outputPath, dedup, level, key, mipSplit);
 
             sw.Stop();
             PrintSuccess($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
@@ -154,7 +153,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: GDeflateCLI patch <base.gpck> <new_content_folder> <output_patch.gpck>");
+                Console.WriteLine("Usage: GPCK patch <base.gpck> <new_content_folder> <output_patch.gpck>");
                 return;
             }
 
@@ -182,7 +181,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI decompress <archive.gpck> [output_path] [--key secret]");
+                Console.WriteLine("Usage: GPCK decompress <archive.gpck> [output_path] [--key secret]");
                 return;
             }
 
@@ -211,7 +210,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: GDeflateCLI extract-file <archive.gpck> <filename> [output_path] [--key secret]");
+                Console.WriteLine("Usage: GPCK extract-file <archive.gpck> <filename> [output_path] [--key secret]");
                 return;
             }
 
@@ -242,7 +241,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: GDeflateCLI cat <archive.gpck> <file_inside> [--key secret]");
+                Console.WriteLine("Usage: GPCK cat <archive.gpck> <file_inside> [--key secret]");
                 return;
             }
             string inputPath = args[1];
@@ -258,7 +257,8 @@ namespace GDeflateCLI
                 using var archive = new GameArchive(inputPath);
                 if (key != null) archive.DecryptionKey = key;
 
-                if (archive.TryGetEntry(target, out var entry))
+                Guid targetId = AssetIdGenerator.Generate(target);
+                if (archive.TryGetEntry(targetId, out var entry))
                 {
                    using var s = archive.OpenRead(entry);
                    using var sr = new StreamReader(s);
@@ -279,7 +279,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI verify <archive.gpck> [--key secret]");
+                Console.WriteLine("Usage: GPCK verify <archive.gpck> [--key secret]");
                 return;
             }
 
@@ -307,7 +307,7 @@ namespace GDeflateCLI
         {
             if (args.Length < 2)
             {
-                Console.WriteLine("Usage: GDeflateCLI info <package.gpck>");
+                Console.WriteLine("Usage: GPCK info <package.gpck>");
                 return;
             }
 
@@ -356,12 +356,12 @@ namespace GDeflateCLI
         {
             if (args.Length < 3)
             {
-                Console.WriteLine("Usage: GDeflateCLI mount <base.gpck> <mod.gpck> ... --check <file_to_check>");
+                Console.WriteLine("Usage: GPCK mount <base.gpck> <mod.gpck> ... --check <file_to_check>");
                 return;
             }
 
             var archives = new List<string>();
-            string checkFile = null;
+            string? checkFile = null;
 
             for (int i = 1; i < args.Length; i++)
             {
@@ -422,7 +422,7 @@ namespace GDeflateCLI
 
         static void ShowHelp()
         {
-            Console.WriteLine("GDeflate CLI Tool");
+            Console.WriteLine("GPCK CLI Tool");
             Console.WriteLine("Commands:");
             Console.WriteLine("  compress <in> [out] [opts]       : Standard Pack");
             Console.WriteLine("  patch <base> <new_dir> <out>     : Create Delta Patch Archive");

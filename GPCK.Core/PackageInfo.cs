@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     public class PackageInfo
     {
@@ -18,7 +18,7 @@ namespace GDeflate.Core
     public class PackageEntryInfo
     {
         public string Path { get; set; } = string.Empty;
-        public Guid AssetId { get; set; } // v8 GUID
+        public Guid AssetId { get; set; }
         public long Offset { get; set; }
         public long OriginalSize { get; set; }
         public long CompressedSize { get; set; }

@@ -1,7 +1,7 @@
 using System;
-using GDeflate.Core;
+using GPCK.Core;
 
-namespace GDeflateGUI
+namespace GPCKGUI
 {
     // Unified data class for both files-on-disk (to pack) and files-in-archive (to view)
     public class FileItem

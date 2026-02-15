@@ -5,7 +5,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// High-Level Asset Manager (Graph Loader).

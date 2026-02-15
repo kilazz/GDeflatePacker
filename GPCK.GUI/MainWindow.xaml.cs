@@ -9,10 +9,10 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
-using GDeflate.Core;
+using GPCK.Core;
 using Microsoft.Win32;
 
-namespace GDeflateGUI
+namespace GPCKGUI
 {
     public partial class MainWindow : Window
     {
@@ -215,7 +215,7 @@ namespace GDeflateGUI
             {
                 await RunOperationAsync(async (token, progress) =>
                 {
-                    await Task.Run(() => _processor.CompressFilesToArchive(filesToPack, saveDialog.FileName, p: progress, t: token));
+                    await Task.Run(() => _processor.CompressFilesToArchive(filesToPack, saveDialog.FileName, progress: progress, token: token));
                 }, BtnCompress, "🚀 Pack");
             }
         }

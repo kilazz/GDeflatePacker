@@ -1,7 +1,7 @@
 using System;
 using System.Text;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Implements FNV-1a 64-bit hashing.

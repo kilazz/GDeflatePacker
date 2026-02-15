@@ -2,7 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// High-performance XxHash64 implementation (Zero-Allocation).

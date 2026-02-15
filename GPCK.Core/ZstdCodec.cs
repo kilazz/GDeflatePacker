@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Native wrapper for Zstandard (libzstd.dll).

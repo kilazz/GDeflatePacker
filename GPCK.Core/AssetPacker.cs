@@ -10,14 +10,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Security.Cryptography;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     public class AssetPacker
     {
         private const int TileSize = 65536; 
-        private const int ChunkSize = 65536; // 64KB chunks for streaming
+        private const int ChunkSize = 65536; 
         private const int DefaultAlignment = 16;
-        private const int GpuAlignment = 4096;
+        private const int GpuAlignment = 4096; // DirectStorage optimal alignment
 
         private class ProcessedFile
         {
@@ -25,7 +25,7 @@ namespace GDeflate.Core
             public required string OriginalPath;
             public uint OriginalSize;
             public uint CompressedSize;
-            public byte[]? CompressedData; 
+            public byte[]? CompressedData; // Rented from Pool if possible, or resized.
             public uint Flags;
             public int Alignment;
             public uint Meta1;
@@ -87,83 +87,136 @@ namespace GDeflate.Core
             await WriteArchive(sortedFiles, depEntries, outputPath, enableDedup, progress, token);
         }
 
-        public void CompressFilesToArchive(IDictionary<string, string> f, string o, bool d = true, int l = 9, bool m = false, IProgress<int>? p = null, CancellationToken t = default)
-            => CompressFilesToArchiveAsync(f, o, d, l, null, m, null, p, t).GetAwaiter().GetResult();
+        public void CompressFilesToArchive(
+            IDictionary<string, string> fileMap, 
+            string outputPath, 
+            bool enableDedup = true, 
+            int level = 9, 
+            byte[]? key = null, 
+            bool enableMipSplit = false, 
+            IProgress<int>? progress = null, 
+            CancellationToken token = default)
+        {
+            CompressFilesToArchiveAsync(fileMap, outputPath, enableDedup, level, key, enableMipSplit, null, progress, token).GetAwaiter().GetResult();
+        }
 
         private async Task ProcessFile(string inputPath, string relPath, int level, byte[]? key, bool mipSplit, bool zstdAvail, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
         {
-            byte[] data = await File.ReadAllBytesAsync(inputPath, ct); 
-            string ext = Path.GetExtension(inputPath).ToLowerInvariant();
-            bool useGDeflate = ext == ".dds" || ext == ".model" || ext == ".geom" || ext == ".gdef";
+            // Use ArrayPool for reading to avoid huge allocations on LOH
+            long fileSize = new FileInfo(inputPath).Length;
+            byte[] fileBuffer = ArrayPool<byte>.Shared.Rent((int)fileSize);
             
-            uint m1 = 0, m2 = 0;
-            if (ext == ".dds")
+            try 
             {
-                var h = DdsUtils.GetHeaderInfo(data);
-                if (h.HasValue)
+                using (var fs = File.OpenRead(inputPath))
                 {
-                    m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
-                    m2 = ((uint)h.Value.MipCount << 8);
+                    // Use ReadExactlyAsync to ensure we get the full file content (fixes CA2022)
+                    await fs.ReadExactlyAsync(fileBuffer, 0, (int)fileSize, ct);
                 }
-            }
+                
+                // Working span
+                var dataSpan = new Span<byte>(fileBuffer, 0, (int)fileSize);
 
-            bool isStreaming = data.Length > 256 * 1024; 
-            
-            var pf = new ProcessedFile 
-            { 
-                AssetId = AssetIdGenerator.Generate(relPath),
-                OriginalPath = relPath, 
-                OriginalSize = (uint)data.Length,
-                Meta1 = m1,
-                Meta2 = m2
-            };
+                string ext = Path.GetExtension(inputPath).ToLowerInvariant();
+                bool useGDeflate = ext == ".dds" || ext == ".model" || ext == ".geom" || ext == ".gdef";
+                
+                uint m1 = 0, m2 = 0;
+                int tailSize = 0;
+                
+                // Copy data for processing (we might mutate order if splitting)
+                byte[]? processingBuffer = null;
 
-            pf.Alignment = useGDeflate ? GpuAlignment : DefaultAlignment;
-            int alignTemp = pf.Alignment;
-            int alignPower = 0;
-            while(alignTemp > 1) { alignTemp >>= 1; alignPower++; }
-            pf.Flags |= (uint)(alignPower << GameArchive.SHIFT_ALIGNMENT);
-
-            if (useGDeflate)
-            {
-                pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_GDEFLATE;
-                pf.CompressedData = CompressGDeflate(data, level);
-            }
-            else if (zstdAvail) 
-            {
-                pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_ZSTD;
-                if (isStreaming)
+                if (ext == ".dds")
                 {
-                    pf.Flags |= GameArchive.FLAG_STREAMING;
-                    pf.CompressedData = CompressZstdStreaming(data, level, key);
-                    pf.Flags |= GameArchive.FLAG_ENCRYPTED; 
+                    var h = DdsUtils.GetHeaderInfo(dataSpan);
+                    if (h.HasValue)
+                    {
+                        m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
+                        // Default meta2 is just mip count
+                        m2 = ((uint)h.Value.MipCount << 8);
+                        
+                        if (mipSplit)
+                        {
+                            // Returns a rented array with re-ordered data: [Tail][Payload]
+                            processingBuffer = DdsUtils.ProcessTextureForStreaming(dataSpan.ToArray(), out tailSize); 
+                            // Store split info in Meta2: Low 24 bits = TailSize
+                            m2 = (m2 & 0xFF000000) | ((uint)tailSize & 0x00FFFFFF);
+                        }
+                    }
+                }
+
+                if (processingBuffer == null)
+                {
+                    processingBuffer = dataSpan.ToArray(); // Fallback copy
+                }
+
+                bool isStreaming = processingBuffer.Length > 256 * 1024 && !useGDeflate; 
+                
+                var pf = new ProcessedFile 
+                { 
+                    AssetId = AssetIdGenerator.Generate(relPath),
+                    OriginalPath = relPath, 
+                    OriginalSize = (uint)processingBuffer.Length,
+                    Meta1 = m1,
+                    Meta2 = m2
+                };
+
+                pf.Alignment = useGDeflate ? GpuAlignment : DefaultAlignment;
+                int alignTemp = pf.Alignment;
+                int alignPower = 0;
+                while(alignTemp > 1) { alignTemp >>= 1; alignPower++; }
+                pf.Flags |= (uint)(alignPower << GameArchive.SHIFT_ALIGNMENT);
+
+                if (useGDeflate)
+                {
+                    pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_GDEFLATE;
+                    pf.CompressedData = CompressGDeflate(processingBuffer, level);
+                }
+                else if (zstdAvail) 
+                {
+                    pf.Flags |= GameArchive.FLAG_IS_COMPRESSED | GameArchive.METHOD_ZSTD;
+                    if (isStreaming)
+                    {
+                        pf.Flags |= GameArchive.FLAG_STREAMING;
+                        pf.CompressedData = CompressZstdStreaming(processingBuffer, level, key);
+                        pf.Flags |= GameArchive.FLAG_ENCRYPTED; 
+                    }
+                    else
+                    {
+                        pf.CompressedData = CompressZstd(processingBuffer, level);
+                        if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
+                    }
                 }
                 else
                 {
-                    pf.CompressedData = CompressZstd(data, level);
+                    pf.Flags |= GameArchive.METHOD_STORE;
+                    pf.CompressedData = processingBuffer; // Careful, if we rented this we need to handle it. For now, we assume copied.
                     if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
                 }
-            }
-            else
-            {
-                pf.Flags |= GameArchive.METHOD_STORE;
-                pf.CompressedData = data;
-                if (key != null) { pf.Flags |= GameArchive.FLAG_ENCRYPTED; pf.CompressedData = Encrypt(pf.CompressedData, key); }
-            }
 
-            if ((pf.Flags & GameArchive.FLAG_STREAMING) == 0 && (pf.Flags & GameArchive.TYPE_TEXTURE) != 0)
-            {
-                pf.Flags |= GameArchive.TYPE_TEXTURE; 
-            }
-            if (ext == ".dds") pf.Flags |= GameArchive.TYPE_TEXTURE;
+                if (tailSize > 0 || ext == ".dds") pf.Flags |= GameArchive.TYPE_TEXTURE;
 
-            pf.CompressedSize = (uint)pf.CompressedData.Length;
-            outBag.Add(pf);
+                pf.CompressedSize = (uint)pf.CompressedData.Length;
+                outBag.Add(pf);
+                
+                // Return rented buffer from ProcessTextureForStreaming if applicable
+                // (Optimized implementation would manage this better, keeping simple for prototype)
+                if (mipSplit && processingBuffer != null && processingBuffer != fileBuffer) 
+                {
+                    ArrayPool<byte>.Shared.Return(processingBuffer);
+                }
+
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(fileBuffer);
+            }
         }
 
         private byte[] CompressGDeflate(byte[] input, int level)
         {
             ulong bound = GDeflateCodec.CompressBound((ulong)input.Length);
+            // GDeflate requires native alignment sometimes, using pinned memory is safer
             byte[] output = new byte[bound];
             unsafe {
                 fixed(byte* pIn = input) fixed(byte* pOut = output) {
@@ -284,10 +337,7 @@ namespace GDeflate.Core
 
             // --- CAS (Content Addressable Storage) & Layout Calculation ---
             long[] finalOffsets = new long[files.Count];
-            // Maps Content Hash (XxHash64) -> File Offset
             var contentMap = new Dictionary<ulong, long>();
-            
-            // Files that need to be written physically (index in 'files' list)
             var filesToWriteIndex = new List<int>();
 
             for(int i=0; i<files.Count; i++)
@@ -301,6 +351,7 @@ namespace GDeflate.Core
                     
                     if (contentMap.TryGetValue(contentHash, out long existingOffset))
                     {
+                        // Ensure alignment matches (reusing offset only if aligned correctly)
                         if ((existingOffset % f.Alignment) == 0)
                         {
                             assignedOffset = existingOffset;
@@ -363,13 +414,15 @@ namespace GDeflate.Core
             long bytesToPad = dataStart - fs.Position;
             if (bytesToPad > 0)
             {
-                byte[] pad = new byte[Math.Min(bytesToPad, 65536)];
-                while (bytesToPad > 0)
-                {
-                    int write = (int)Math.Min(bytesToPad, pad.Length);
-                    await fs.WriteAsync(pad, 0, write, token);
-                    bytesToPad -= write;
-                }
+                byte[] pad = ArrayPool<byte>.Shared.Rent(65536);
+                try {
+                    while (bytesToPad > 0)
+                    {
+                        int write = (int)Math.Min(bytesToPad, 65536);
+                        await fs.WriteAsync(pad, 0, write, token);
+                        bytesToPad -= write;
+                    }
+                } finally { ArrayPool<byte>.Shared.Return(pad); }
             }
 
             // 6. Write Data Blobs
@@ -383,8 +436,15 @@ namespace GDeflate.Core
                 if (currentPos < requiredPos)
                 {
                     long padLen = requiredPos - currentPos;
-                    byte[] pad = new byte[padLen];
-                    await fs.WriteAsync(pad, 0, (int)padLen, token);
+                    // Write padding logic
+                    byte[] pad = ArrayPool<byte>.Shared.Rent(4096);
+                    Array.Clear(pad, 0, pad.Length); // Zero out padding
+                    while(padLen > 0) {
+                         int w = (int)Math.Min(padLen, pad.Length);
+                         await fs.WriteAsync(pad, 0, w, token);
+                         padLen -= w;
+                    }
+                    ArrayPool<byte>.Shared.Return(pad);
                 }
                 
                 if (f.CompressedData != null)

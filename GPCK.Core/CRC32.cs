@@ -1,6 +1,6 @@
 using System;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Fast table-based CRC32 implementation compatible with ZIP standard.

@@ -2,7 +2,7 @@ using System;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Represents a 128-bit Global Asset Identifier (GUID).

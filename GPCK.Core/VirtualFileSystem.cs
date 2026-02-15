@@ -2,8 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Diagnostics.CodeAnalysis;
 
-namespace GDeflate.Core
+namespace GPCK.Core
 {
     /// <summary>
     /// Virtual File System (VFS).
@@ -48,7 +49,7 @@ namespace GDeflate.Core
             throw new FileNotFoundException($"File not found in VFS: {virtualPath}");
         }
 
-        public bool TryGetEntryForId(Guid id, out GameArchive archive, out GameArchive.FileEntry entry)
+        public bool TryGetEntryForId(Guid id, [NotNullWhen(true)] out GameArchive? archive, out GameArchive.FileEntry entry)
         {
              if (_virtualLookup.TryGetValue(id, out int archiveIndex))
             {
