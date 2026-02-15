@@ -20,7 +20,7 @@ namespace GPCK.CLI
                 config.AddCommand<CompressCommand>("compress")
                     .WithAlias("pack")
                     .WithDescription("Compress a folder into a .gpck archive.");
-                
+
                 config.AddCommand<DecompressCommand>("decompress")
                     .WithAlias("unpack")
                     .WithDescription("Decompress a .gpck archive.");
@@ -30,7 +30,7 @@ namespace GPCK.CLI
 
                 config.AddCommand<InfoCommand>("info")
                     .WithDescription("Show technical details about an archive.");
-                    
+
                 config.AddCommand<PatchCommand>("patch")
                     .WithDescription("Create a delta patch based on an existing archive.");
             });
@@ -62,7 +62,7 @@ namespace GPCK.CLI
 
             [CommandOption("--mip-split")]
             public bool MipSplit { get; set; }
-            
+
             [CommandOption("--key")]
             public string? Key { get; set; }
         }
@@ -73,16 +73,16 @@ namespace GPCK.CLI
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
 
             AnsiConsole.MarkupLine($"[bold green]Packing:[/] {settings.Input} -> {output} (Method: {settings.Method})");
-            
+
             var packer = new AssetPacker();
             var map = AssetPacker.BuildFileMap(settings.Input);
 
             await AnsiConsole.Progress()
-                .StartAsync(async ctx => 
+                .StartAsync(async ctx =>
                 {
                     var task = ctx.AddTask("[green]Compressing assets...[/]");
                     var progress = new Progress<int>(p => task.Value = p);
-                    
+
                     await packer.CompressFilesToArchiveAsync(
                         map, output, true, settings.Level, keyBytes, settings.MipSplit, null, progress, default, settings.Method);
                 });
@@ -114,16 +114,14 @@ namespace GPCK.CLI
             AnsiConsole.MarkupLine($"[bold blue]Unpacking:[/] {settings.Archive} -> {outDir}");
 
             var packer = new AssetPacker();
-            
+
             await AnsiConsole.Progress()
                 .StartAsync(async ctx =>
                 {
                     var task = ctx.AddTask("[blue]Extracting...[/]");
                     var progress = new Progress<int>(p => task.Value = p);
-                    
-                    // We need to wrap the sync method or use a Task.Run (since packer decompress is sync in interface but we want async UI)
-                    // Updated Packer to have Async Decompress or we wrap it.
-                    await Task.Run(() => packer.DecompressArchive(settings.Archive, outDir, keyBytes, progress));
+
+                    await packer.DecompressArchiveAsync(settings.Archive, outDir, keyBytes, progress);
                 });
 
             return 0;
@@ -143,7 +141,7 @@ namespace GPCK.CLI
         public override int Execute(CommandContext context, Settings settings)
         {
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
-            
+
             return AnsiConsole.Status()
                 .Start("Verifying integrity...", ctx =>
                 {
@@ -169,14 +167,14 @@ namespace GPCK.CLI
         public override int Execute(CommandContext context, Settings settings)
         {
             var info = new AssetPacker().InspectPackage(settings.Archive);
-            
+
             var grid = new Grid();
             grid.AddColumn();
             grid.AddColumn();
             grid.AddRow("Version", info.Version.ToString());
             grid.AddRow("Files", info.FileCount.ToString());
             grid.AddRow("Total Size", $"{info.TotalSize / 1024.0 / 1024.0:F2} MB");
-            
+
             AnsiConsole.Write(new Panel(grid).Header("Archive Info"));
 
             var table = new Table();
@@ -199,11 +197,11 @@ namespace GPCK.CLI
             return 0;
         }
     }
-    
+
     public class PatchCommand : AsyncCommand<PatchCommand.Settings>
     {
-        public class Settings : CommandSettings 
-        { 
+        public class Settings : CommandSettings
+        {
             [CommandArgument(0, "<BASE>")] public string Base { get; set; } = "";
             [CommandArgument(1, "<CONTENT>")] public string Content { get; set; } = "";
             [CommandArgument(2, "<OUTPUT>")] public string Output { get; set; } = "";
@@ -212,10 +210,10 @@ namespace GPCK.CLI
         public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
         {
             AnsiConsole.MarkupLine($"Creating patch [bold]{settings.Output}[/] from [bold]{settings.Content}[/] against [bold]{settings.Base}[/]");
-            
+
             var packer = new AssetPacker();
             var map = AssetPacker.BuildFileMap(settings.Content);
-            
+
             await AnsiConsole.Progress().StartAsync(async ctx => {
                 var t = ctx.AddTask("Computing Deltas & Packing...");
                 await packer.CreatePatchArchiveAsync(settings.Base, map, settings.Output, 9, null, null, default);

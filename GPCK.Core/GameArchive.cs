@@ -29,12 +29,12 @@ namespace GPCK.Core
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct ArchiveHeader
         {
-            public int Magic; // "GPCK"
+            public int Magic;
             public int Version;
             public int FileCount;
             public int Padding1;
             public int DependencyCount;
-            public int Padding2; // Align to 24
+            public int Padding2;
             public long FileTableOffset;
             public long Reserved;
             public long NameTableOffset;
@@ -103,33 +103,38 @@ namespace GPCK.Core
             if (!fi.Exists) throw new FileNotFoundException(path);
             long fileLength = fi.Length;
 
-            if (fileLength < Marshal.SizeOf<ArchiveHeader>()) throw new InvalidDataException("File too short");
+            if (fileLength < Marshal.SizeOf<ArchiveHeader>())
+                throw new InvalidDataException($"Archive file is too short: {fileLength} bytes. Minimum required: {Marshal.SizeOf<ArchiveHeader>()}");
 
             _mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
             _dataFileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
 
-            // Read Header safely
             _view.Read(0, out _header);
 
-            // Verify Magic
             string magicRead = Encoding.ASCII.GetString(BitConverter.GetBytes(_header.Magic));
-            if (magicRead != MagicStr) throw new InvalidDataException($"Invalid Magic: {magicRead}");
+            if (magicRead != MagicStr) throw new InvalidDataException($"Invalid Archive Magic: {magicRead}. Expected: {MagicStr}");
             if (_header.Version != Version) throw new NotSupportedException($"Version mismatch. Archive: {_header.Version}, Engine: {Version}");
 
-            // Validate offsets
-            if (_header.FileTableOffset < 0 || _header.FileTableOffset >= fileLength) throw new InvalidDataException("Invalid File Table Offset");
+            // Validate offsets - loosen check to > fileLength to allow empty tables at end of file
+            if (_header.FileTableOffset < 0 || _header.FileTableOffset > fileLength)
+                throw new InvalidDataException($"Invalid File Table Offset: {_header.FileTableOffset}. File length: {fileLength}");
+
+            // Check if actual file table data exists
+            if (_header.FileCount > 0)
+            {
+                long tableEnd = _header.FileTableOffset + (_header.FileCount * FileEntrySize);
+                if (tableEnd > fileLength)
+                    throw new InvalidDataException($"File Table extends beyond file bounds. Offset: {_header.FileTableOffset}, Count: {_header.FileCount}");
+            }
         }
 
         public FileEntry GetEntryByIndex(int index)
         {
             if (index < 0 || index >= FileCount) throw new IndexOutOfRangeException();
-
             long offset = _header.FileTableOffset + ((long)index * FileEntrySize);
-
-            FileEntry entry;
-            _view.Read(offset, out entry);
+            _view.Read(offset, out FileEntry entry);
             return entry;
         }
 
@@ -144,8 +149,7 @@ namespace GPCK.Core
 
             for(int i=0; i<count; i++)
             {
-                DependencyEntry dep;
-                _view.Read(offset + (i * step), out dep);
+                _view.Read(offset + (i * step), out DependencyEntry dep);
                 list.Add(dep);
             }
             return list;
@@ -165,8 +169,7 @@ namespace GPCK.Core
                 }
             }
 
-            if (_dependencyLookup.TryGetValue(assetId, out var list)) return list;
-            return new List<DependencyEntry>();
+            return _dependencyLookup.TryGetValue(assetId, out var list) ? list : new List<DependencyEntry>();
         }
 
         public SafeFileHandle GetFileHandle() => _dataFileStream.SafeFileHandle;
@@ -191,10 +194,6 @@ namespace GPCK.Core
         {
             if (_header.NameTableOffset == 0) return null;
 
-            // Safe implementation using View Accessor without raw pointers
-            // Note: This is slower than raw pointers but safer. For production tool, unsafe is fine,
-            // but for this refactor we prioritize safety.
-
             long ptr = _header.NameTableOffset;
             long end = _view.Capacity;
 
@@ -202,13 +201,11 @@ namespace GPCK.Core
             {
                 if (ptr >= end - 16) break;
 
-                // Read Guid
                 byte[] guidBytes = new byte[16];
                 _view.ReadArray(ptr, guidBytes, 0, 16);
                 Guid entryGuid = new Guid(guidBytes);
                 ptr += 16;
 
-                // Read VarInt Length
                 int length = 0;
                 int shift = 0;
                 byte b;
@@ -254,7 +251,7 @@ namespace GPCK.Core
             for(int i=0; i < Math.Min(FileCount, 5000); i++)
             {
                 var e = GetEntryByIndex(i);
-                uint methodMask = e.Flags & MASK_METHOD;
+                uint methodMask = e.Flags & GameArchive.MASK_METHOD;
                 string methodStr = methodMask switch {
                     METHOD_GDEFLATE => "GDeflate",
                     METHOD_ZSTD => "Zstd",

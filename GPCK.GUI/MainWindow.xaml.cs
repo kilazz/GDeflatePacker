@@ -17,7 +17,6 @@ using Microsoft.Win32;
 
 namespace GPCKGUI
 {
-    // Simple ViewModel for Visualizer Blocks
     public class BlockItem
     {
         public double Width { get; set; }
@@ -39,12 +38,11 @@ namespace GPCKGUI
             InitializeComponent();
             _files = new ObservableCollection<FileItem>();
             _blocks = new ObservableCollection<BlockItem>();
-            
-            // Setup Filtering View
+
             _fileView = CollectionViewSource.GetDefaultView(_files);
             _fileView.Filter = FileFilter;
             FileList.ItemsSource = _fileView;
-            
+
             VisualizerItems.ItemsSource = _blocks;
             _processor = new AssetPacker();
             CheckBackend();
@@ -70,10 +68,9 @@ namespace GPCKGUI
 
         private void UpdateListCount()
         {
-            // Update visual counter based on filtered view
             int count = 0;
             foreach(var item in _fileView) count++;
-            
+
             int total = _files.Count;
             if (count != total)
                 TxtListCount.Text = $"{count} / {total} items";
@@ -106,9 +103,9 @@ namespace GPCKGUI
                 var archive = new GameArchive(path);
                 _openArchives.Add(archive);
                 var info = archive.GetPackageInfo();
-                
+
                 _blocks.Clear();
-                long totalPixels = 1000; // Arbitrary width for visualizer logic
+                long totalPixels = 1000;
                 double scale = totalPixels / (double)info.TotalSize;
 
                 foreach (var entry in info.Entries)
@@ -123,25 +120,24 @@ namespace GPCKGUI
                             AssetId = entry.AssetId,
                             RelativePath = entry.Path,
                             Size = FormatSize(entry.OriginalSize),
-                            FilePath = path, 
+                            FilePath = path,
                             CompressedSizeBytes = entry.CompressedSize,
                             ManifestInfo = entry.MetadataInfo
                         });
 
-                        // Visualizer Logic
-                        double w = Math.Max(2, entry.CompressedSize * scale * 50); // Scale up for visibility
-                        if (w > 200) w = 200; // Cap width
-                        
+                        double w = Math.Max(2, entry.CompressedSize * scale * 50);
+                        if (w > 200) w = 200;
+
                         var color = Brushes.LightGray;
                         if (entry.Method.Contains("GDeflate")) color = Brushes.LightGreen;
                         else if (entry.Method.Contains("Zstd")) color = Brushes.LightBlue;
                         else if (entry.Method.Contains("LZ4")) color = Brushes.Orange;
-                        
-                        _blocks.Add(new BlockItem 
-                        { 
-                            Width = w, 
-                            Color = color, 
-                            ToolTip = $"{entry.Path}\n{entry.CompressedSize} bytes" 
+
+                        _blocks.Add(new BlockItem
+                        {
+                            Width = w,
+                            Color = color,
+                            ToolTip = $"{entry.Path}\n{entry.CompressedSize} bytes"
                         });
                     }
                 }
@@ -280,7 +276,6 @@ namespace GPCKGUI
             var filesToPack = _files.Where(x => !x.IsArchiveEntry).DistinctBy(x => x.FilePath).ToDictionary(x => x.FilePath, x => x.RelativePath);
             if (filesToPack.Count == 0) return;
 
-            // Get method from UI
             string sel = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
             AssetPacker.CompressionMethod method = Enum.Parse<AssetPacker.CompressionMethod>(sel);
 
@@ -289,7 +284,7 @@ namespace GPCKGUI
             {
                 await RunOperationAsync(async (token, progress) =>
                 {
-                    await Task.Run(() => _processor.CompressFilesToArchive(filesToPack, saveDialog.FileName, progress: progress, token: token, method: method));
+                    await _processor.CompressFilesToArchiveAsync(filesToPack, saveDialog.FileName, true, 9, null, false, null, progress, token, method);
                 }, BtnCompress, "🚀 Pack");
             }
         }
@@ -297,29 +292,31 @@ namespace GPCKGUI
         private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
         {
              if (_cts != null) { _cts.Cancel(); return; }
-             // IMPORTANT: Extract filtered items if filter is active
-             var items = FileList.SelectedItems.Count > 0 
-                ? FileList.SelectedItems.Cast<FileItem>().ToList() 
+             var items = FileList.SelectedItems.Count > 0
+                ? FileList.SelectedItems.Cast<FileItem>().ToList()
                 : _fileView.Cast<FileItem>().ToList();
-             
+
+             if (items.Count == 0) return;
+
              var dialog = new OpenFolderDialog();
              if (dialog.ShowDialog() == true)
              {
                  await RunOperationAsync(async (token, progress) =>
                  {
-                     await Task.Run(() => {
-                         int i=0;
-                         foreach(var item in items)
+                     int i = 0;
+                     foreach(var item in items)
+                     {
+                         token.ThrowIfCancellationRequested();
+                         string outPath = Path.Combine(dialog.FolderName, item.RelativePath);
+                         Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                         using var s = GetStreamForItem(item);
+                         if (s != null)
                          {
-                             token.ThrowIfCancellationRequested();
-                             string outPath = Path.Combine(dialog.FolderName, item.RelativePath);
-                             Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
-                             using var s = GetStreamForItem(item);
-                             using var fs = File.Create(outPath);
-                             s?.CopyTo(fs);
-                             progress.Report((int)(++i / (float)items.Count * 100));
+                             using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
+                             await s.CopyToAsync(fs, token);
                          }
-                     });
+                         progress.Report((int)(++i / (float)items.Count * 100));
+                     }
                  }, BtnExtractAll, "Extract");
              }
         }
@@ -340,7 +337,8 @@ namespace GPCKGUI
             btn.Content = "Cancel";
             ProgressBar.Visibility = Visibility.Visible;
             try { await action(_cts.Token, new Progress<int>(v => ProgressBar.Value = v)); }
-            catch { }
+            catch (OperationCanceledException) { UpdateStatus("Operation Canceled"); }
+            catch (Exception ex) { MessageBox.Show(ex.Message, "Error"); }
             finally { _cts = null; btn.Content = defText; ProgressBar.Visibility = Visibility.Hidden; }
         }
 
@@ -356,7 +354,6 @@ namespace GPCKGUI
         private async Task AddFolderAsync(string f)
         {
             var map = await Task.Run(() => AssetPacker.BuildFileMap(f));
-            // Dispatch to UI thread
             Application.Current.Dispatcher.Invoke(() => {
                 foreach(var kv in map)
                     if (!_files.Any(x=>x.FilePath == kv.Key))

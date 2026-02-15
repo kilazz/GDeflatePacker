@@ -4,10 +4,6 @@ using System.Runtime.InteropServices;
 
 namespace GPCK.Core
 {
-    /// <summary>
-    /// High-performance XxHash64 implementation (Zero-Allocation).
-    /// Used for fast content deduplication in the packing process.
-    /// </summary>
     public static class XxHash64
     {
         private const ulong Prime64_1 = 11400714785074694791;
@@ -18,6 +14,15 @@ namespace GPCK.Core
 
         public static unsafe ulong Compute(ReadOnlySpan<byte> data, ulong seed = 0)
         {
+            fixed (byte* pData = data)
+            {
+                return Compute(pData, data.Length, seed);
+            }
+        }
+
+        public static unsafe ulong Compute(byte[] data, ulong seed = 0)
+        {
+            if (data == null || data.Length == 0) return seed + Prime64_5;
             fixed (byte* pData = data)
             {
                 return Compute(pData, data.Length, seed);
@@ -59,7 +64,8 @@ namespace GPCK.Core
 
             hash += (ulong)length;
 
-            while (p <= bEnd - 8)
+            // Safe loop for 8-byte chunks
+            while (p + 8 <= bEnd)
             {
                 ulong k1 = Round(0, *(ulong*)p);
                 hash ^= k1;
@@ -67,13 +73,15 @@ namespace GPCK.Core
                 p += 8;
             }
 
-            if (p <= bEnd - 4)
+            // Safe check for 4-byte chunk
+            if (p + 4 <= bEnd)
             {
                 hash ^= (*(uint*)p) * Prime64_1;
                 hash = RotateLeft(hash, 23) * Prime64_2 + Prime64_3;
                 p += 4;
             }
 
+            // Remaining bytes
             while (p < bEnd)
             {
                 hash ^= (*p) * Prime64_5;
