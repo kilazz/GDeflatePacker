@@ -36,8 +36,6 @@ namespace GPCKGUI
         public MainWindow()
         {
             InitializeComponent();
-            _files = new ObservableCollection<FileItem>();
-            _blocks = new ObservableCollection<BlockItem>();
 
             _fileView = CollectionViewSource.GetDefaultView(_files);
             _fileView.Filter = FileFilter;
@@ -46,7 +44,7 @@ namespace GPCKGUI
             VisualizerItems.ItemsSource = _blocks;
             _processor = new AssetPacker();
             CheckBackend();
-            UpdateStatus($"Ready");
+            UpdateStatus("Ready");
         }
 
         private bool FileFilter(object item)
@@ -54,8 +52,9 @@ namespace GPCKGUI
             if (string.IsNullOrWhiteSpace(TxtSearch.Text)) return true;
             if (item is FileItem f)
             {
-                return f.RelativePath.Contains(TxtSearch.Text, StringComparison.OrdinalIgnoreCase) ||
-                       f.AssetId.ToString().Contains(TxtSearch.Text, StringComparison.OrdinalIgnoreCase);
+                string search = TxtSearch.Text;
+                return f.RelativePath.Contains(search, StringComparison.OrdinalIgnoreCase) ||
+                       f.AssetId.ToString().Contains(search, StringComparison.OrdinalIgnoreCase);
             }
             return false;
         }
@@ -68,10 +67,9 @@ namespace GPCKGUI
 
         private void UpdateListCount()
         {
-            int count = 0;
-            foreach(var item in _fileView) count++;
-
+            int count = _fileView.Cast<object>().Count();
             int total = _files.Count;
+
             if (count != total)
                 TxtListCount.Text = $"{count} / {total} items";
             else
@@ -80,19 +78,36 @@ namespace GPCKGUI
 
         protected override void OnClosed(EventArgs e)
         {
-            foreach (var arch in _openArchives) arch.Dispose();
+            CancelCurrentOperation();
+            DisposeArchives();
             base.OnClosed(e);
+        }
+
+        private void DisposeArchives()
+        {
+            foreach (var arch in _openArchives) arch.Dispose();
+            _openArchives.Clear();
+        }
+
+        private void CancelCurrentOperation()
+        {
+            if (_cts != null)
+            {
+                _cts.Cancel();
+                _cts.Dispose();
+                _cts = null;
+            }
         }
 
         private void CheckBackend()
         {
-            var g = _processor.IsCpuLibraryAvailable();
-            TxtBackendStatus.Text = $"GDeflate:{(g?"✓":"❌")}";
+            bool g = _processor.IsCpuLibraryAvailable();
+            TxtBackendStatus.Text = $"GDeflate: {(g ? "Available ✓" : "Unavailable ❌")}";
         }
 
         private void BtnOpenArchive_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new OpenFileDialog { Filter = "Game Packages (*.gpck)|*.gpck", Title = "Inspect Archive" };
+            var dialog = new OpenFileDialog { Filter = "GPCK Packages (*.gpck)|*.gpck", Title = "Open Archive" };
             if (dialog.ShowDialog() == true) LoadArchive(dialog.FileName);
         }
 
@@ -104,9 +119,8 @@ namespace GPCKGUI
                 _openArchives.Add(archive);
                 var info = archive.GetPackageInfo();
 
-                _blocks.Clear();
-                long totalPixels = 1000;
-                double scale = totalPixels / (double)info.TotalSize;
+                long totalBytes = info.TotalSize;
+                double scale = 2000.0 / totalBytes; // Visual scale
 
                 foreach (var entry in info.Entries)
                 {
@@ -125,8 +139,8 @@ namespace GPCKGUI
                             ManifestInfo = entry.MetadataInfo
                         });
 
-                        double w = Math.Max(2, entry.CompressedSize * scale * 50);
-                        if (w > 200) w = 200;
+                        double w = Math.Max(1.0, entry.CompressedSize * scale);
+                        if (w > 300) w = 300; // Cap width for wrap panel
 
                         var color = Brushes.LightGray;
                         if (entry.Method.Contains("GDeflate")) color = Brushes.LightGreen;
@@ -137,7 +151,7 @@ namespace GPCKGUI
                         {
                             Width = w,
                             Color = color,
-                            ToolTip = $"{entry.Path}\n{entry.CompressedSize} bytes"
+                            ToolTip = $"{entry.Path}\nCompressed: {FormatSize(entry.CompressedSize)}\nOriginal: {FormatSize(entry.OriginalSize)}\nMethod: {entry.Method}"
                         });
                     }
                 }
@@ -146,7 +160,7 @@ namespace GPCKGUI
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed: {ex.Message}", "Error");
+                MessageBox.Show($"Failed to load archive: {ex.Message}", "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -156,12 +170,12 @@ namespace GPCKGUI
             ResetPreview();
             if (item == null) return;
 
-            UpdateStatus($"Selected: {item.RelativePath} ({item.AssetId})");
+            UpdateStatus($"Inspecting: {item.RelativePath}");
 
             try
             {
                 using var stream = GetStreamForItem(item);
-                if (stream == null || stream.Length == 0) return;
+                if (stream == null) return;
 
                 string ext = Path.GetExtension(item.RelativePath).ToLowerInvariant();
                 if (IsImage(ext)) await ShowImagePreview(stream);
@@ -171,7 +185,7 @@ namespace GPCKGUI
             catch (Exception ex)
             {
                 TxtPreview.Visibility = Visibility.Visible;
-                TxtPreview.Text = $"Error: {ex.Message}";
+                TxtPreview.Text = $"Error loading preview: {ex.Message}";
                 LblNoPreview.Visibility = Visibility.Collapsed;
             }
         }
@@ -180,8 +194,8 @@ namespace GPCKGUI
         {
             if (item.IsArchiveEntry && item.SourceArchive != null && item.EntryInfo.HasValue)
                 return item.SourceArchive.OpenRead(item.EntryInfo.Value);
-            else if (File.Exists(item.FilePath))
-                return File.OpenRead(item.FilePath);
+            else if (!string.IsNullOrEmpty(item.FilePath) && File.Exists(item.FilePath))
+                return new FileStream(item.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
             return null;
         }
 
@@ -192,12 +206,14 @@ namespace GPCKGUI
                 using var memory = new MemoryStream();
                 await source.CopyToAsync(memory);
                 memory.Position = 0;
+
                 var bitmap = new BitmapImage();
                 bitmap.BeginInit();
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
                 bitmap.StreamSource = memory;
                 bitmap.EndInit();
                 bitmap.Freeze();
+
                 ImgPreview.Source = bitmap;
                 ImgPreview.Visibility = Visibility.Visible;
                 LblNoPreview.Visibility = Visibility.Collapsed;
@@ -205,32 +221,36 @@ namespace GPCKGUI
             catch
             {
                 source.Position = 0;
-                ShowHexPreview(source, "Image decode failed.");
+                ShowHexPreview(source, "Image decode failed. Showing hex instead.");
             }
         }
 
         private async Task ShowTextPreview(Stream source)
         {
-            using var reader = new StreamReader(source, Encoding.UTF8, true, 1024, true);
-            char[] buffer = new char[5000];
+            using var reader = new StreamReader(source, Encoding.UTF8, true, 4096, true);
+            char[] buffer = new char[8192];
             int read = await reader.ReadAsync(buffer, 0, buffer.Length);
-            TxtPreview.Text = new string(buffer, 0, read);
+
+            TxtPreview.Text = new string(buffer, 0, read) + (read == buffer.Length ? "\n... [Preview Truncated]" : "");
             TxtPreview.Visibility = Visibility.Visible;
             LblNoPreview.Visibility = Visibility.Collapsed;
         }
 
         private void ShowHexPreview(Stream source, string title)
         {
-            byte[] buffer = new byte[512];
+            byte[] buffer = new byte[1024];
             int read = source.Read(buffer, 0, buffer.Length);
             var sb = new StringBuilder();
-            sb.AppendLine($"--- BINARY PREVIEW: {title} ---");
+            sb.AppendLine($"HEX PREVIEW: {title}");
+            sb.AppendLine(new string('-', 40));
+
             for (int i = 0; i < read; i++)
             {
                 if (i % 16 == 0) sb.Append($"{i:X4}: ");
                 sb.Append($"{buffer[i]:X2} ");
                 if (i % 16 == 15) sb.AppendLine();
             }
+
             HexPreview.Text = sb.ToString();
             HexPreview.Visibility = Visibility.Visible;
             LblNoPreview.Visibility = Visibility.Collapsed;
@@ -245,18 +265,18 @@ namespace GPCKGUI
             LblNoPreview.Visibility = Visibility.Visible;
         }
 
-        private bool IsImage(string ext) => ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp";
-        private bool IsText(string ext) => ext == ".txt" || ext == ".json" || ext == ".xml" || ext == ".lua" || ext == ".ini";
+        private bool IsImage(string ext) => ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".ico";
+        private bool IsText(string ext) => ext == ".txt" || ext == ".json" || ext == ".xml" || ext == ".lua" || ext == ".ini" || ext == ".yaml" || ext == ".xaml";
 
         private void BtnAddFiles_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new OpenFileDialog { Multiselect = true, Title = "Select Files" };
+            var dialog = new OpenFileDialog { Multiselect = true, Title = "Add Assets" };
             if (dialog.ShowDialog() == true) AddFiles(dialog.FileNames);
         }
 
         private void BtnAddFolder_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new OpenFolderDialog();
+            var dialog = new OpenFolderDialog { Title = "Add Folder Content" };
             if (dialog.ShowDialog() == true) _ = AddFolderAsync(dialog.FolderName);
         }
 
@@ -264,41 +284,51 @@ namespace GPCKGUI
         {
             _files.Clear();
             _blocks.Clear();
-            foreach (var a in _openArchives) a.Dispose();
-            _openArchives.Clear();
+            DisposeArchives();
             ResetPreview();
             UpdateListCount();
+            UpdateStatus("List cleared");
         }
 
         private async void BtnCompress_Click(object sender, RoutedEventArgs e)
         {
-            if (_cts != null) { _cts.Cancel(); return; }
-            var filesToPack = _files.Where(x => !x.IsArchiveEntry).DistinctBy(x => x.FilePath).ToDictionary(x => x.FilePath, x => x.RelativePath);
-            if (filesToPack.Count == 0) return;
+            if (_cts != null) { CancelCurrentOperation(); return; }
+
+            var filesToPack = _files.Where(x => !x.IsArchiveEntry)
+                                    .DistinctBy(x => x.FilePath)
+                                    .ToDictionary(x => x.FilePath, x => x.RelativePath);
+
+            if (filesToPack.Count == 0)
+            {
+                MessageBox.Show("No new files added to pack. Add files or folders first.", "Pack Info");
+                return;
+            }
 
             string sel = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
-            AssetPacker.CompressionMethod method = Enum.Parse<AssetPacker.CompressionMethod>(sel);
+            if (!Enum.TryParse<AssetPacker.CompressionMethod>(sel, out var method)) method = AssetPacker.CompressionMethod.Auto;
 
-            var saveDialog = new SaveFileDialog { Filter = "Game Package (*.gpck)|*.gpck", FileName = "assets.gpck" };
+            var saveDialog = new SaveFileDialog { Filter = "GPCK Package (*.gpck)|*.gpck", FileName = "new_assets.gpck" };
             if (saveDialog.ShowDialog() == true)
             {
                 await RunOperationAsync(async (token, progress) =>
                 {
-                    await _processor.CompressFilesToArchiveAsync(filesToPack, saveDialog.FileName, true, 9, null, false, null, progress, token, method);
-                }, BtnCompress, "🚀 Pack");
+                    await _processor.CompressFilesToArchiveAsync(filesToPack, saveDialog.FileName, true, 9, null, false, progress, token, method);
+                }, BtnCompress, "🚀 Pack .gpck");
+
+                UpdateStatus("Archive created successfully.");
             }
         }
 
         private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
         {
-             if (_cts != null) { _cts.Cancel(); return; }
-             var items = FileList.SelectedItems.Count > 0
-                ? FileList.SelectedItems.Cast<FileItem>().ToList()
-                : _fileView.Cast<FileItem>().ToList();
+             if (_cts != null) { CancelCurrentOperation(); return; }
+
+             var selectedItems = FileList.SelectedItems.Cast<FileItem>().ToList();
+             var items = selectedItems.Count > 0 ? selectedItems : _files.ToList();
 
              if (items.Count == 0) return;
 
-             var dialog = new OpenFolderDialog();
+             var dialog = new OpenFolderDialog { Title = "Select Extraction Folder" };
              if (dialog.ShowDialog() == true)
              {
                  await RunOperationAsync(async (token, progress) =>
@@ -309,15 +339,20 @@ namespace GPCKGUI
                          token.ThrowIfCancellationRequested();
                          string outPath = Path.Combine(dialog.FolderName, item.RelativePath);
                          Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+
                          using var s = GetStreamForItem(item);
                          if (s != null)
                          {
-                             using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
+                             using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, FileOptions.Asynchronous);
                              await s.CopyToAsync(fs, token);
                          }
-                         progress.Report((int)(++i / (float)items.Count * 100));
+
+                         i++;
+                         progress.Report((int)((float)i / items.Count * 100));
                      }
-                 }, BtnExtractAll, "Extract");
+                 }, BtnExtractAll, "Extract Selected");
+
+                 UpdateStatus($"Extracted {items.Count} files.");
              }
         }
 
@@ -325,9 +360,15 @@ namespace GPCKGUI
         {
              if (e.Data.GetDataPresent(DataFormats.FileDrop))
              {
-                 var f = (string[])e.Data.GetData(DataFormats.FileDrop);
-                 if (f[0].EndsWith(".gpck")) LoadArchive(f[0]);
-                 else AddFiles(f);
+                 string[]? f = (string[]?)e.Data.GetData(DataFormats.FileDrop);
+                 if (f == null) return;
+
+                 foreach(var path in f)
+                 {
+                     if (path.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase)) LoadArchive(path);
+                     else if (Directory.Exists(path)) _ = AddFolderAsync(path);
+                     else AddFiles(new[] { path });
+                 }
              }
         }
 
@@ -336,33 +377,79 @@ namespace GPCKGUI
             _cts = new CancellationTokenSource();
             btn.Content = "Cancel";
             ProgressBar.Visibility = Visibility.Visible;
-            try { await action(_cts.Token, new Progress<int>(v => ProgressBar.Value = v)); }
-            catch (OperationCanceledException) { UpdateStatus("Operation Canceled"); }
-            catch (Exception ex) { MessageBox.Show(ex.Message, "Error"); }
-            finally { _cts = null; btn.Content = defText; ProgressBar.Visibility = Visibility.Hidden; }
+            ProgressBar.Value = 0;
+
+            try
+            {
+                await action(_cts.Token, new Progress<int>(v => ProgressBar.Value = v));
+                UpdateStatus("Operation completed.");
+            }
+            catch (OperationCanceledException)
+            {
+                UpdateStatus("Operation cancelled.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Operation failed: {ex.Message}", "Process Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                UpdateStatus("Operation failed.");
+            }
+            finally
+            {
+                _cts?.Dispose();
+                _cts = null;
+                btn.Content = defText;
+                ProgressBar.Visibility = Visibility.Hidden;
+            }
         }
 
         private void AddFiles(string[] paths)
         {
              foreach(var p in paths) {
-                 if (File.Exists(p)) _files.Add(new FileItem { FilePath = p, RelativePath = Path.GetFileName(p), AssetId = AssetIdGenerator.Generate(Path.GetFileName(p)), Size = FormatSize(new FileInfo(p).Length)});
-                 else if (Directory.Exists(p)) _ = AddFolderAsync(p);
+                 if (File.Exists(p))
+                 {
+                     _files.Add(new FileItem
+                     {
+                         FilePath = p,
+                         RelativePath = Path.GetFileName(p),
+                         AssetId = AssetIdGenerator.Generate(Path.GetFileName(p)),
+                         Size = FormatSize(new FileInfo(p).Length)
+                     });
+                 }
              }
              UpdateListCount();
         }
 
         private async Task AddFolderAsync(string f)
         {
+            UpdateStatus($"Scanning folder: {f}");
             var map = await Task.Run(() => AssetPacker.BuildFileMap(f));
+
             Application.Current.Dispatcher.Invoke(() => {
                 foreach(var kv in map)
-                    if (!_files.Any(x=>x.FilePath == kv.Key))
-                        _files.Add(new FileItem { FilePath = kv.Key, RelativePath = kv.Value, AssetId = AssetIdGenerator.Generate(kv.Value), Size = FormatSize(new FileInfo(kv.Key).Length)});
+                {
+                    if (!_files.Any(x => x.FilePath == kv.Key))
+                    {
+                        _files.Add(new FileItem
+                        {
+                            FilePath = kv.Key,
+                            RelativePath = kv.Value,
+                            AssetId = AssetIdGenerator.Generate(kv.Value),
+                            Size = FormatSize(new FileInfo(kv.Key).Length)
+                        });
+                    }
+                }
                 UpdateListCount();
+                UpdateStatus($"Added folder content: {Path.GetFileName(f)}");
             });
         }
 
-        private string FormatSize(long b) => b < 1024 ? $"{b} B" : $"{b/1024.0:F2} KB";
+        private string FormatSize(long b)
+        {
+            if (b < 1024) return $"{b} B";
+            if (b < 1024 * 1024) return $"{b/1024.0:F2} KB";
+            return $"{b/(1024.0*1024.0):F2} MB";
+        }
+
         private void UpdateStatus(string m) => TxtStatus.Text = m;
     }
 }

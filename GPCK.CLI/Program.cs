@@ -84,7 +84,7 @@ namespace GPCK.CLI
                     var progress = new Progress<int>(p => task.Value = p);
 
                     await packer.CompressFilesToArchiveAsync(
-                        map, output, true, settings.Level, keyBytes, settings.MipSplit, null, progress, default, settings.Method);
+                        map, output, true, settings.Level, keyBytes, settings.MipSplit, progress, default, settings.Method);
                 });
 
             AnsiConsole.MarkupLine("[bold green]Done![/]");
@@ -228,7 +228,7 @@ namespace GPCK.CLI
 
             await AnsiConsole.Progress().StartAsync(async ctx => {
                 var t = ctx.AddTask("Computing Deltas & Packing...");
-                await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, null, default);
+                await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, default);
                 t.Value = 100;
             });
             return 0;

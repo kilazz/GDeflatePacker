@@ -11,7 +11,6 @@ namespace GPCK.Core
         public int FileCount { get; set; }
         public long TotalSize { get; set; }
         public bool HasDebugNames { get; set; }
-        public int DependencyCount { get; set; }
         public List<PackageEntryInfo> Entries { get; set; } = new List<PackageEntryInfo>();
     }
 

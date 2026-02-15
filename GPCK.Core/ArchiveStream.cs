@@ -1,9 +1,6 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
 using System.IO;
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,42 +30,57 @@ namespace GPCK.Core
         {
             _archive = archive;
             _entry = entry;
-            _position = 0;
 
             _isCompressed = (entry.Flags & GameArchive.FLAG_IS_COMPRESSED) != 0;
-            _isEncrypted = (entry.Flags & GameArchive.FLAG_ENCRYPTED) != 0;
+            _isEncrypted = (entry.Flags & GameArchive.FLAG_ENCRYPTED_META) != 0;
             _isChunked = (entry.Flags & GameArchive.FLAG_STREAMING) != 0;
             _method = entry.Flags & GameArchive.MASK_METHOD;
 
             if (_isEncrypted && _archive.DecryptionKey != null)
-            {
                 _aes = new AesGcm(_archive.DecryptionKey, 16);
-            }
 
-            if (_isChunked)
-            {
-                InitializeChunkTable();
-            }
+            if (_isChunked) InitializeChunkTable();
         }
 
         private void InitializeChunkTable()
         {
-            byte[] header = new byte[4];
-            RandomAccess.Read(_archive.GetFileHandle(), header, _entry.DataOffset);
-            int count = BitConverter.ToInt32(header, 0);
+            byte[] countBuffer = new byte[4];
+            RandomAccess.Read(_archive.GetFileHandle(), countBuffer, _entry.DataOffset);
+            int count = BitConverter.ToInt32(countBuffer, 0);
 
             _chunkTable = new GameArchive.ChunkHeaderEntry[count];
-            byte[] tableBuffer = new byte[count * 8];
-            RandomAccess.Read(_archive.GetFileHandle(), tableBuffer, _entry.DataOffset + 4);
 
-            for (int i = 0; i < count; i++)
+            if (_aes != null)
             {
-                _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
-                    CompressedSize = BitConverter.ToUInt32(tableBuffer, i * 8),
-                    OriginalSize = BitConverter.ToUInt32(tableBuffer, i * 8 + 4)
-                };
+                int encTableSize = 28 + (count * 8);
+                byte[] encTable = new byte[encTableSize];
+                RandomAccess.Read(_archive.GetFileHandle(), encTable, _entry.DataOffset + 4);
+
+                byte[] decTable = new byte[count * 8];
+                _aes.Decrypt(encTable.AsSpan(0, 12), encTable.AsSpan(28), encTable.AsSpan(12, 16), decTable);
+
+                for (int i = 0; i < count; i++)
+                {
+                    _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
+                        CompressedSize = BitConverter.ToUInt32(decTable, i * 8),
+                        OriginalSize = BitConverter.ToUInt32(decTable, i * 8 + 4)
+                    };
+                }
+                _dataStartOffset = _entry.DataOffset + 4 + encTableSize;
             }
-            _dataStartOffset = _entry.DataOffset + 4 + (count * 8);
+            else
+            {
+                byte[] tableBuffer = new byte[count * 8];
+                RandomAccess.Read(_archive.GetFileHandle(), tableBuffer, _entry.DataOffset + 4);
+                for (int i = 0; i < count; i++)
+                {
+                    _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
+                        CompressedSize = BitConverter.ToUInt32(tableBuffer, i * 8),
+                        OriginalSize = BitConverter.ToUInt32(tableBuffer, i * 8 + 4)
+                    };
+                }
+                _dataStartOffset = _entry.DataOffset + 4 + (count * 8);
+            }
         }
 
         public override bool CanRead => true;
@@ -77,101 +89,40 @@ namespace GPCK.Core
         public override long Length => _entry.OriginalSize;
         public override long Position { get => _position; set => _position = value; }
 
-        public override int Read(byte[] buffer, int offset, int count) => Read(new Span<byte>(buffer, offset, count));
-
         public override int Read(Span<byte> buffer)
         {
             if (_position >= Length) return 0;
-            int totalRead = 0;
             int toRead = Math.Min(buffer.Length, (int)(Length - _position));
-
-            if (!_isChunked)
-            {
-                // Simple non-chunked fallback (rare in GPCK)
-                byte[] raw = ArrayPool<byte>.Shared.Rent((int)_entry.CompressedSize);
-                try {
-                    RandomAccess.Read(_archive.GetFileHandle(), raw.AsSpan(0, (int)_entry.CompressedSize), _entry.DataOffset);
-                    byte[] decoded = new byte[_entry.OriginalSize];
-                    ProcessBlock(raw.AsSpan(0, (int)_entry.CompressedSize), decoded, _entry.OriginalSize);
-                    int slice = Math.Min(toRead, (int)(_entry.OriginalSize - _position));
-                    decoded.AsSpan((int)_position, slice).CopyTo(buffer);
-                    _position += slice;
-                    return slice;
-                } finally { ArrayPool<byte>.Shared.Return(raw); }
-            }
+            int totalRead = 0;
 
             while (totalRead < toRead)
             {
                 int chunkIdx = GetChunkIndexForPosition(_position, out long offsetInChunk);
                 LoadChunk(chunkIdx);
 
-                int availableInChunk = (int)(_chunkTable![chunkIdx].OriginalSize - offsetInChunk);
-                int copyCount = Math.Min(toRead - totalRead, availableInChunk);
+                int available = (int)(_chunkTable![chunkIdx].OriginalSize - offsetInChunk);
+                int copyCount = Math.Min(toRead - totalRead, available);
 
                 _currentChunkData.AsSpan((int)offsetInChunk, copyCount).CopyTo(buffer.Slice(totalRead));
-
                 _position += copyCount;
                 totalRead += copyCount;
             }
-
             return totalRead;
         }
 
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            return await ReadAsync(new Memory<byte>(buffer, offset, count), cancellationToken);
-        }
-
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
-        {
-            if (_position >= Length) return 0;
-            int totalRead = 0;
-            int toRead = Math.Min(buffer.Length, (int)(Length - _position));
-
-            if (!_isChunked)
-            {
-                byte[] raw = ArrayPool<byte>.Shared.Rent((int)_entry.CompressedSize);
-                try {
-                    await RandomAccess.ReadAsync(_archive.GetFileHandle(), raw.AsMemory(0, (int)_entry.CompressedSize), _entry.DataOffset, cancellationToken).ConfigureAwait(false);
-                    byte[] decoded = new byte[_entry.OriginalSize];
-                    ProcessBlock(raw.AsSpan(0, (int)_entry.CompressedSize), decoded, _entry.OriginalSize);
-                    int slice = Math.Min(toRead, (int)(_entry.OriginalSize - _position));
-                    decoded.AsSpan((int)_position, slice).CopyTo(buffer.Span);
-                    _position += slice;
-                    return slice;
-                } finally { ArrayPool<byte>.Shared.Return(raw); }
-            }
-
-            while (totalRead < toRead)
-            {
-                int chunkIdx = GetChunkIndexForPosition(_position, out long offsetInChunk);
-                await LoadChunkAsync(chunkIdx, cancellationToken).ConfigureAwait(false);
-
-                int availableInChunk = (int)(_chunkTable![chunkIdx].OriginalSize - offsetInChunk);
-                int copyCount = Math.Min(toRead - totalRead, availableInChunk);
-
-                _currentChunkData.AsSpan((int)offsetInChunk, copyCount).CopyTo(buffer.Span.Slice(totalRead));
-
-                _position += copyCount;
-                totalRead += copyCount;
-            }
-
-            return totalRead;
-        }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
 
         private int GetChunkIndexForPosition(long pos, out long offsetInChunk)
         {
-            if (!_isChunked || _chunkTable == null) { offsetInChunk = pos; return 0; }
-
-            long accumulated = 0;
-            for (int i = 0; i < _chunkTable.Length; i++)
+            long acc = 0;
+            for (int i = 0; i < _chunkTable!.Length; i++)
             {
-                if (pos < accumulated + _chunkTable[i].OriginalSize)
+                if (pos < acc + _chunkTable[i].OriginalSize)
                 {
-                    offsetInChunk = pos - accumulated;
+                    offsetInChunk = pos - acc;
                     return i;
                 }
-                accumulated += _chunkTable[i].OriginalSize;
+                acc += _chunkTable[i].OriginalSize;
             }
             offsetInChunk = 0;
             return _chunkTable.Length - 1;
@@ -179,131 +130,47 @@ namespace GPCK.Core
 
         private void LoadChunk(int index)
         {
-            if (_currentChunkIndex == index && _currentChunkData != null) return;
+            if (_currentChunkIndex == index) return;
 
-            long physicalOffset = _dataStartOffset;
-            for (int i = 0; i < index; i++) physicalOffset += _chunkTable![i].CompressedSize;
-
-            uint compSize = _chunkTable![index].CompressedSize;
-            uint origSize = _chunkTable![index].OriginalSize;
-
-            byte[] compBuffer = ArrayPool<byte>.Shared.Rent((int)compSize);
-            try
-            {
-                RandomAccess.Read(_archive.GetFileHandle(), compBuffer.AsSpan(0, (int)compSize), physicalOffset);
-
-                if (_currentChunkData == null || _currentChunkData.Length < origSize)
-                    _currentChunkData = new byte[origSize];
-
-                ProcessBlock(compBuffer.AsSpan(0, (int)compSize), _currentChunkData, origSize);
-                _currentChunkIndex = index;
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(compBuffer);
-            }
-        }
-
-        private async ValueTask LoadChunkAsync(int index, CancellationToken ct)
-        {
-            if (_currentChunkIndex == index && _currentChunkData != null) return;
-
-            long physicalOffset = _dataStartOffset;
-            for (int i = 0; i < index; i++) physicalOffset += _chunkTable![i].CompressedSize;
+            long offset = _dataStartOffset;
+            for (int i = 0; i < index; i++) offset += _chunkTable![i].CompressedSize;
 
             uint compSize = _chunkTable![index].CompressedSize;
             uint origSize = _chunkTable![index].OriginalSize;
 
             byte[] compBuffer = ArrayPool<byte>.Shared.Rent((int)compSize);
-            try
-            {
-                await RandomAccess.ReadAsync(_archive.GetFileHandle(), compBuffer.AsMemory(0, (int)compSize), physicalOffset, ct).ConfigureAwait(false);
-
-                if (_currentChunkData == null || _currentChunkData.Length < origSize)
-                    _currentChunkData = new byte[origSize];
-
-                ProcessBlock(compBuffer.AsSpan(0, (int)compSize), _currentChunkData, origSize);
+            try {
+                RandomAccess.Read(_archive.GetFileHandle(), compBuffer.AsSpan(0, (int)compSize), offset);
+                if (_currentChunkData == null || _currentChunkData.Length < origSize) _currentChunkData = new byte[origSize];
+                DecompressInternal(compBuffer.AsSpan(0, (int)compSize), _currentChunkData, origSize);
                 _currentChunkIndex = index;
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(compBuffer);
-            }
-        }
-
-        private unsafe void ProcessBlock(ReadOnlySpan<byte> source, byte[] destination, uint targetSize)
-        {
-            ReadOnlySpan<byte> dataToDecompress = source;
-
-            if (_isEncrypted && _aes != null)
-            {
-                var nonce = source.Slice(0, 12);
-                var tag = source.Slice(12, 16);
-                var ciphertext = source.Slice(28);
-                byte[] dec = ArrayPool<byte>.Shared.Rent(ciphertext.Length);
-                try {
-                    _aes.Decrypt(nonce, ciphertext, tag, dec.AsSpan(0, ciphertext.Length));
-                    dataToDecompress = dec.AsSpan(0, ciphertext.Length);
-                    DecompressInternal(dataToDecompress, destination, targetSize);
-                } finally {
-                    ArrayPool<byte>.Shared.Return(dec);
-                }
-            }
-            else
-            {
-                DecompressInternal(dataToDecompress, destination, targetSize);
-            }
+            } finally { ArrayPool<byte>.Shared.Return(compBuffer); }
         }
 
         private unsafe void DecompressInternal(ReadOnlySpan<byte> source, byte[] destination, uint targetSize)
         {
-            if (!_isCompressed)
-            {
-                source.CopyTo(destination);
-                return;
-            }
+            if (!_isCompressed) { source.CopyTo(destination); return; }
 
-            fixed (byte* pSrc = source)
-            fixed (byte* pDst = destination)
+            fixed (byte* pSrc = source, pDst = destination)
             {
-                if (_method == GameArchive.METHOD_GDEFLATE)
-                {
-                    if (!CodecGDeflate.Decompress(pDst, targetSize, pSrc, (ulong)source.Length, 1))
-                        throw new IOException("GDeflate Error");
-                }
-                else if (_method == GameArchive.METHOD_ZSTD)
-                {
-                    ulong res = CodecZstd.ZSTD_decompress((IntPtr)pDst, targetSize, (IntPtr)pSrc, (ulong)source.Length);
-                    if (CodecZstd.ZSTD_isError(res) != 0) throw new IOException("Zstd Error");
-                }
-                else if (_method == GameArchive.METHOD_LZ4)
-                {
-                    int res = CodecLZ4.LZ4_decompress_safe((IntPtr)pSrc, (IntPtr)pDst, source.Length, (int)targetSize);
-                    if (res < 0) throw new IOException("LZ4 Error");
-                }
+                bool success = _method switch {
+                    GameArchive.METHOD_GDEFLATE => CodecGDeflate.Decompress(pDst, targetSize, pSrc, (ulong)source.Length, 1),
+                    GameArchive.METHOD_ZSTD => CodecZstd.ZSTD_decompress((IntPtr)pDst, targetSize, (IntPtr)pSrc, (ulong)source.Length) < (ulong)uint.MaxValue,
+                    GameArchive.METHOD_LZ4 => CodecLZ4.LZ4_decompress_safe((IntPtr)pSrc, (IntPtr)pDst, source.Length, (int)targetSize) >= 0,
+                    _ => false
+                };
+                if (!success) throw new IOException("Decompression failed");
             }
         }
 
-        public override long Seek(long offset, SeekOrigin origin)
-        {
-            long target = origin switch {
-                SeekOrigin.Begin => offset,
-                SeekOrigin.Current => _position + offset,
-                SeekOrigin.End => Length + offset,
-                _ => throw new ArgumentException("Invalid Origin")
-            };
-            _position = Math.Clamp(target, 0, Length);
+        public override long Seek(long offset, SeekOrigin origin) {
+            _position = Math.Clamp(origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => _position + offset, SeekOrigin.End => Length + offset, _ => _position }, 0, Length);
             return _position;
         }
 
         public override void Flush() { }
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        protected override void Dispose(bool disposing)
-        {
-            _aes?.Dispose();
-            base.Dispose(disposing);
-        }
+        protected override void Dispose(bool disposing) { _aes?.Dispose(); base.Dispose(disposing); }
     }
 }

@@ -6,22 +6,26 @@
 			<Setter Property="Foreground" Value="#333333"/>
 			<Setter Property="BorderBrush" Value="#DDDDDD"/>
 			<Setter Property="BorderThickness" Value="1"/>
-			<Setter Property="Padding" Value="15,8"/>
-			<Setter Property="FontSize" Value="14"/>
+			<Setter Property="Padding" Value="12,6"/>
+			<Setter Property="FontSize" Value="13"/>
 			<Setter Property="Cursor" Value="Hand"/>
+			<Setter Property="MinHeight" Value="32"/>
 			<Setter Property="Template">
 				<Setter.Value>
 					<ControlTemplate TargetType="Button">
 						<Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
-							<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+							<ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
 						</Border>
 					</ControlTemplate>
 				</Setter.Value>
 			</Setter>
 			<Style.Triggers>
 				<Trigger Property="IsMouseOver" Value="True">
-					<Setter Property="Background" Value="#F0F0F0"/>
-					<Setter Property="BorderBrush" Value="#BBBBBB"/>
+					<Setter Property="Background" Value="#F5F5F5"/>
+					<Setter Property="BorderBrush" Value="#CCCCCC"/>
+				</Trigger>
+				<Trigger Property="IsPressed" Value="True">
+					<Setter Property="Background" Value="#EEEEEE"/>
 				</Trigger>
 				<Trigger Property="IsEnabled" Value="False">
 					<Setter Property="Opacity" Value="0.5"/>
@@ -39,9 +43,12 @@
 				<Trigger Property="IsMouseOver" Value="True">
 					<Setter Property="Background" Value="#005A9E"/>
 				</Trigger>
+				<Trigger Property="IsPressed" Value="True">
+					<Setter Property="Background" Value="#004A8E"/>
+				</Trigger>
 			</Style.Triggers>
 		</Style>
-		<!-- Destructive/Clear Button (Reddish hover) -->
+		<!-- Danger Button (Reddish hover) -->
 		<Style x:Key="DangerBtn" TargetType="Button" BasedOn="{StaticResource ModernBtn}">
 			<Style.Triggers>
 				<Trigger Property="IsMouseOver" Value="True">

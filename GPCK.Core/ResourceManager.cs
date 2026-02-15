@@ -30,16 +30,6 @@ namespace GPCK.Core
             if (!_vfs.TryGetEntryForId(assetId, out var archive, out var entry))
                 throw new FileNotFoundException($"Asset {assetId} not found in VFS.");
 
-            // Dependencies
-            var deps = archive.GetDependenciesForAsset(assetId);
-            foreach(var dep in deps)
-            {
-                if (dep.Type == GameArchive.DependencyType.HardReference)
-                {
-                    await LoadAssetRecursive<object>(dep.TargetAssetId, ct).ConfigureAwait(false);
-                }
-            }
-
             using var stream = archive.OpenRead(entry);
             object? result;
 
