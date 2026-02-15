@@ -8,15 +8,25 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using GPCK.Core;
 using Microsoft.Win32;
 
 namespace GPCKGUI
 {
+    // Simple ViewModel for Visualizer Blocks
+    public class BlockItem
+    {
+        public double Width { get; set; }
+        public required Brush Color { get; set; }
+        public required string ToolTip { get; set; }
+    }
+
     public partial class MainWindow : Window
     {
         private ObservableCollection<FileItem> _files = new ObservableCollection<FileItem>();
+        private ObservableCollection<BlockItem> _blocks = new ObservableCollection<BlockItem>();
         private AssetPacker _processor;
         private CancellationTokenSource? _cts;
         private List<GameArchive> _openArchives = new List<GameArchive>();
@@ -25,7 +35,9 @@ namespace GPCKGUI
         {
             InitializeComponent();
             _files = new ObservableCollection<FileItem>();
+            _blocks = new ObservableCollection<BlockItem>();
             FileList.ItemsSource = _files;
+            VisualizerItems.ItemsSource = _blocks;
             _processor = new AssetPacker();
             CheckBackend();
             UpdateStatus($"Ready");
@@ -40,8 +52,8 @@ namespace GPCKGUI
         private void CheckBackend()
         {
             var g = _processor.IsCpuLibraryAvailable();
-            var z = ZstdCodec.IsAvailable();
-            TxtBackendStatus.Text = $"GDeflate:{(g?"✓":"❌")} | Zstd:{(z?"✓":"❌")}";
+            // Zstd check omitted as it is now integrated into Core logic more deeply
+            TxtBackendStatus.Text = $"GDeflate:{(g?"✓":"❌")}";
         }
 
         private void BtnOpenArchive_Click(object sender, RoutedEventArgs e)
@@ -58,6 +70,10 @@ namespace GPCKGUI
                 _openArchives.Add(archive);
                 var info = archive.GetPackageInfo();
                 
+                _blocks.Clear();
+                long totalPixels = 1000; // Arbitrary width for visualizer logic
+                double scale = totalPixels / (double)info.TotalSize;
+
                 foreach (var entry in info.Entries)
                 {
                     if (archive.TryGetEntry(entry.AssetId, out var rawEntry))
@@ -73,6 +89,21 @@ namespace GPCKGUI
                             FilePath = path, 
                             CompressedSizeBytes = entry.CompressedSize,
                             ManifestInfo = entry.MetadataInfo
+                        });
+
+                        // Visualizer Logic
+                        double w = Math.Max(2, entry.CompressedSize * scale * 50); // Scale up for visibility
+                        if (w > 200) w = 200; // Cap width
+                        
+                        var color = Brushes.LightGray;
+                        if (entry.Method.Contains("GDeflate")) color = Brushes.LightGreen;
+                        else if (entry.Method.Contains("Zstd")) color = Brushes.LightBlue;
+                        
+                        _blocks.Add(new BlockItem 
+                        { 
+                            Width = w, 
+                            Color = color, 
+                            ToolTip = $"{entry.Path}\n{entry.CompressedSize} bytes" 
                         });
                     }
                 }
@@ -97,9 +128,7 @@ namespace GPCKGUI
                 using var stream = GetStreamForItem(item);
                 if (stream == null || stream.Length == 0) return;
 
-                // Simple extension check for UI preview only
                 string ext = Path.GetExtension(item.RelativePath).ToLowerInvariant();
-
                 if (IsImage(ext)) await ShowImagePreview(stream);
                 else if (IsText(ext)) await ShowTextPreview(stream);
                 else ShowHexPreview(stream, item.RelativePath);
@@ -160,7 +189,7 @@ namespace GPCKGUI
             byte[] buffer = new byte[512];
             int read = source.Read(buffer, 0, buffer.Length);
             var sb = new StringBuilder();
-            sb.AppendLine($"--- BINARY PREVIEW ---");
+            sb.AppendLine($"--- BINARY PREVIEW: {title} ---");
             for (int i = 0; i < read; i++)
             {
                 if (i % 16 == 0) sb.Append($"{i:X4}: ");
@@ -199,6 +228,7 @@ namespace GPCKGUI
         private void BtnClear_Click(object sender, RoutedEventArgs e)
         {
             _files.Clear();
+            _blocks.Clear();
             foreach (var a in _openArchives) a.Dispose();
             _openArchives.Clear();
             ResetPreview();
@@ -231,6 +261,8 @@ namespace GPCKGUI
                  {
                      await Task.Run(() => {
                          int i=0;
+                         // Using multithreaded extraction would be faster but for simplicity in UI thread handling we do sequential here or use Packer logic
+                         // Let's use Packer's Decompress logic if extracting ALL, but here we might have specific items.
                          foreach(var item in items)
                          {
                              token.ThrowIfCancellationRequested();

@@ -1,450 +1,222 @@
 using System;
-using System.IO;
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+using System.IO;
+using System.Threading.Tasks;
 using GPCK.Core;
-using System.Threading;
+using Spectre.Console;
+using Spectre.Console.Cli;
 
 namespace GPCK.CLI
 {
     class Program
     {
-        static void Main(string[] args)
+        public static int Main(string[] args)
         {
-            if (args.Length == 0)
+            var app = new CommandApp();
+            app.Configure(config =>
             {
-                ShowHelp();
-                return;
-            }
+                config.SetApplicationName("GPCK");
+                config.AddCommand<CompressCommand>("compress")
+                    .WithAlias("pack")
+                    .WithDescription("Compress a folder into a .gpck archive.");
 
-            if (!GDeflateCodec.IsAvailable())
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Error: GDeflate.dll not found.");
-                Console.ResetColor();
-                return;
-            }
+                config.AddCommand<DecompressCommand>("decompress")
+                    .WithAlias("unpack")
+                    .WithDescription("Decompress a .gpck archive.");
 
-            try
-            {
-                string command = args[0].ToLower();
-                switch (command)
-                {
-                    case "compress":
-                    case "-c":
-                        RunCompress(args);
-                        break;
-                    case "patch": 
-                    case "-delta":
-                        RunPatch(args);
-                        break;
-                    case "decompress":
-                    case "-d":
-                        RunDecompress(args);
-                        break;
-                    case "extract-file":
-                    case "-e":
-                        RunExtractFile(args);
-                        break;
-                    case "cat":
-                    case "-p":
-                        RunCat(args);
-                        break;
-                    case "verify":
-                    case "-v":
-                        RunVerify(args);
-                        break;
-                    case "info":
-                    case "-i":
-                        RunInfo(args);
-                        break;
-                    case "mount":
-                    case "-m":
-                        RunMount(args);
-                        break;
-                    case "help":
-                    case "--help":
-                    case "-h":
-                        ShowHelp();
-                        break;
-                    default:
-                        Console.WriteLine($"Unknown command: {command}");
-                        ShowHelp();
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                PrintError(ex);
-            }
+                config.AddCommand<VerifyCommand>("verify")
+                    .WithDescription("Verify the integrity (CRC/Hash) of an archive.");
+
+                config.AddCommand<InfoCommand>("info")
+                    .WithDescription("Show technical details about an archive.");
+
+                config.AddCommand<PatchCommand>("patch")
+                    .WithDescription("Create a delta patch based on an existing archive.");
+            });
+
+            return app.Run(args);
+        }
+    }
+
+    public class CompressCommand : AsyncCommand<CompressCommand.Settings>
+    {
+        public class Settings : CommandSettings
+        {
+            [CommandArgument(0, "<INPUT>")]
+            [Description("Input folder or file.")]
+            public string Input { get; set; } = "";
+
+            [CommandArgument(1, "[OUTPUT]")]
+            [Description("Output .gpck file path.")]
+            public string? Output { get; set; }
+
+            [CommandOption("-l|--level")]
+            [DefaultValue(9)]
+            public int Level { get; set; }
+
+            [CommandOption("--mip-split")]
+            public bool MipSplit { get; set; }
+
+            [CommandOption("--key")]
+            public string? Key { get; set; }
         }
 
-        static byte[]? ParseKey(string keyString)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
         {
-            if (string.IsNullOrEmpty(keyString)) return null;
-            using var sha = System.Security.Cryptography.SHA256.Create();
-            return sha.ComputeHash(Encoding.UTF8.GetBytes(keyString));
+            string output = settings.Output ?? Path.ChangeExtension(settings.Input, ".gpck");
+            byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
+
+            AnsiConsole.MarkupLine($"[bold green]Packing:[/] {settings.Input} -> {output}");
+
+            var packer = new AssetPacker();
+            var map = AssetPacker.BuildFileMap(settings.Input);
+
+            await AnsiConsole.Progress()
+                .StartAsync(async ctx =>
+                {
+                    var task = ctx.AddTask("[green]Compressing assets...[/]");
+                    var progress = new Progress<int>(p => task.Value = p);
+
+                    await packer.CompressFilesToArchiveAsync(
+                        map, output, true, settings.Level, keyBytes, settings.MipSplit, null, progress, default);
+                });
+
+            AnsiConsole.MarkupLine("[bold green]Done![/]");
+            return 0;
+        }
+    }
+
+    public class DecompressCommand : AsyncCommand<DecompressCommand.Settings>
+    {
+        public class Settings : CommandSettings
+        {
+            [CommandArgument(0, "<ARCHIVE>")]
+            public string Archive { get; set; } = "";
+
+            [CommandArgument(1, "[OUTPUT]")]
+            public string? Output { get; set; }
+
+            [CommandOption("--key")]
+            public string? Key { get; set; }
         }
 
-        static void RunCompress(string[] args)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
         {
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: GPCK compress <file/folder> [output] [-l level] [--no-dedup] [--mip-split] [--key secret]");
-                return;
-            }
+            string outDir = settings.Output ?? Path.GetFileNameWithoutExtension(settings.Archive);
+            byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
 
-            string inputPath = args[1];
-            if (!ValidateInput(inputPath)) return;
-            string outputPath = DeriveOutputPath(inputPath);
-            bool dedup = true;
-            bool mipSplit = false;
-            int level = 9;
-            byte[]? key = null;
+            AnsiConsole.MarkupLine($"[bold blue]Unpacking:[/] {settings.Archive} -> {outDir}");
 
-            for (int i = 2; i < args.Length; i++)
-            {
-                if (args[i] == "--no-dedup") dedup = false;
-                else if (args[i] == "--mip-split") mipSplit = true;
-                else if (args[i] == "-l" || args[i] == "--level")
+            var packer = new AssetPacker();
+
+            await AnsiConsole.Progress()
+                .StartAsync(async ctx =>
                 {
-                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int l))
+                    var task = ctx.AddTask("[blue]Extracting...[/]");
+                    var progress = new Progress<int>(p => task.Value = p);
+
+                    // We need to wrap the sync method or use a Task.Run (since packer decompress is sync in interface but we want async UI)
+                    // Updated Packer to have Async Decompress or we wrap it.
+                    await Task.Run(() => packer.DecompressArchive(settings.Archive, outDir, keyBytes, progress));
+                });
+
+            return 0;
+        }
+    }
+
+    public class VerifyCommand : Command<VerifyCommand.Settings>
+    {
+        public class Settings : CommandSettings
+        {
+            [CommandArgument(0, "<ARCHIVE>")]
+            public string Archive { get; set; } = "";
+            [CommandOption("--key")]
+            public string? Key { get; set; }
+        }
+
+        public override int Execute(CommandContext context, Settings settings)
+        {
+            byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
+
+            return AnsiConsole.Status()
+                .Start("Verifying integrity...", ctx =>
+                {
+                    bool result = new AssetPacker().VerifyArchive(settings.Archive, keyBytes);
+                    if (result)
                     {
-                        level = l;
-                        i++;
+                        AnsiConsole.MarkupLine("[bold green]VERIFICATION PASSED[/]");
+                        return 0;
                     }
-                }
-                else if (args[i] == "--key" && i+1 < args.Length)
-                {
-                    key = ParseKey(args[i+1]);
-                    i++;
-                }
-                else if (!args[i].StartsWith("-"))
-                {
-                    outputPath = args[i];
-                }
-            }
-
-            if (!outputPath.EndsWith(".gpck", StringComparison.OrdinalIgnoreCase)) outputPath += ".gpck";
-
-            var processor = new AssetPacker();
-            Console.WriteLine($"Processing: {Path.GetFileName(inputPath)}");
-            Console.WriteLine($"Mode: Full Archive");
-            Console.WriteLine($"Options: Dedup={dedup}, MipSplit={mipSplit}, Level={level}");
-            
-            var sw = Stopwatch.StartNew();
-            Dictionary<string, string> map;
-
-            if (Directory.Exists(inputPath))
-                map = AssetPacker.BuildFileMap(inputPath);
-            else
-                map = new Dictionary<string, string> { { inputPath, Path.GetFileName(inputPath) } };
-
-            Console.WriteLine($"Target files: {map.Count}");
-            processor.CompressFilesToArchive(map, outputPath, dedup, level, key, mipSplit);
-
-            sw.Stop();
-            PrintSuccess($"Operation completed in {sw.Elapsed.TotalSeconds:F2} seconds.");
-        }
-
-        static void RunPatch(string[] args)
-        {
-            if (args.Length < 3)
-            {
-                Console.WriteLine("Usage: GPCK patch <base.gpck> <new_content_folder> <output_patch.gpck>");
-                return;
-            }
-
-            string basePath = args[1];
-            string contentPath = args[2];
-            string outPath = args[3];
-
-            if (!File.Exists(basePath)) { Console.WriteLine("Base archive not found."); return; }
-            if (!Directory.Exists(contentPath)) { Console.WriteLine("Content folder not found."); return; }
-
-            Console.WriteLine($"Creating Delta Patch for: {Path.GetFileName(basePath)}");
-            Console.WriteLine($"Source Content: {contentPath}");
-            
-            var sw = Stopwatch.StartNew();
-            var map = AssetPacker.BuildFileMap(contentPath);
-            
-            var proc = new AssetPacker();
-            proc.CreatePatchArchiveAsync(basePath, map, outPath, 9, null, null, CancellationToken.None).GetAwaiter().GetResult();
-            
-            sw.Stop();
-            PrintSuccess($"Patch created: {outPath} ({sw.Elapsed.TotalSeconds:F2}s)");
-        }
-
-        static void RunDecompress(string[] args)
-        {
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: GPCK decompress <archive.gpck> [output_path] [--key secret]");
-                return;
-            }
-
-            string inputPath = args[1];
-            if (!ValidateInput(inputPath)) return;
-            string outputDir = "."; 
-            byte[]? key = null;
-
-            int outputIdx = 2;
-            if (args.Length > 2 && !args[2].StartsWith("-")) { outputDir = args[2]; outputIdx = 3; }
-            else { outputDir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(inputPath)) ?? ".", Path.GetFileNameWithoutExtension(inputPath)); }
-
-            for(int i=outputIdx; i<args.Length; i++)
-            {
-                if (args[i] == "--key" && i+1 < args.Length) { key = ParseKey(args[i+1]); i++; }
-            }
-
-            Console.WriteLine($"Extracting All to: {outputDir}");
-            var sw = Stopwatch.StartNew();
-            new AssetPacker().DecompressArchive(inputPath, outputDir, key);
-            sw.Stop();
-            PrintSuccess($"Done in {sw.Elapsed.TotalSeconds:F2}s!");
-        }
-
-        static void RunExtractFile(string[] args)
-        {
-            if (args.Length < 3)
-            {
-                Console.WriteLine("Usage: GPCK extract-file <archive.gpck> <filename> [output_path] [--key secret]");
-                return;
-            }
-
-            string inputPath = args[1];
-            string target = args[2];
-            byte[]? key = null;
-            if (!ValidateInput(inputPath)) return;
-            string outputDir = ".";
-            
-            int argIdx = 3;
-            if (args.Length > 3 && !args[3].StartsWith("-")) { outputDir = args[3]; argIdx = 4; }
-
-            for(int i=argIdx; i<args.Length; i++)
-            {
-                if (args[i] == "--key" && i+1 < args.Length) { key = ParseKey(args[i+1]); i++; }
-            }
-
-            Console.WriteLine($"Extracting '{target}' from {Path.GetFileName(inputPath)}...");
-            try 
-            {
-                new AssetPacker().ExtractSingleFile(inputPath, outputDir, target, key);
-                PrintSuccess($"Extracted successfully.");
-            }
-            catch(Exception e) { PrintError(e); }
-        }
-
-        static void RunCat(string[] args)
-        {
-            if (args.Length < 3)
-            {
-                Console.WriteLine("Usage: GPCK cat <archive.gpck> <file_inside> [--key secret]");
-                return;
-            }
-            string inputPath = args[1];
-            string target = args[2];
-            byte[]? key = null;
-             for(int i=3; i<args.Length; i++)
-            {
-                if (args[i] == "--key" && i+1 < args.Length) { key = ParseKey(args[i+1]); i++; }
-            }
-
-            try 
-            {
-                using var archive = new GameArchive(inputPath);
-                if (key != null) archive.DecryptionKey = key;
-
-                Guid targetId = AssetIdGenerator.Generate(target);
-                if (archive.TryGetEntry(targetId, out var entry))
-                {
-                   using var s = archive.OpenRead(entry);
-                   using var sr = new StreamReader(s);
-                   Console.WriteLine(sr.ReadToEnd());
-                }
-                else
-                {
-                   Console.WriteLine("File not found.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-            }
-        }
-
-        static void RunVerify(string[] args)
-        {
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: GPCK verify <archive.gpck> [--key secret]");
-                return;
-            }
-
-            string inputPath = args[1];
-            byte[]? key = null;
-            if (args.Length > 2 && args[2] == "--key" && args.Length > 3) key = ParseKey(args[3]);
-
-            if (!ValidateInput(inputPath)) return;
-
-            Console.WriteLine($"Verifying integrity of: {Path.GetFileName(inputPath)}...");
-            var sw = Stopwatch.StartNew();
-            bool valid = new AssetPacker().VerifyArchive(inputPath, key);
-            sw.Stop();
-
-            if (valid) PrintSuccess($"Verification Passed ({sw.Elapsed.TotalSeconds:F2}s). Archive is healthy.");
-            else 
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("VERIFICATION FAILED.");
-                Console.ResetColor();
-            }
-        }
-
-        static void RunInfo(string[] args)
-        {
-            if (args.Length < 2)
-            {
-                Console.WriteLine("Usage: GPCK info <package.gpck>");
-                return;
-            }
-
-            string inputPath = args[1];
-            if (!ValidateInput(inputPath)) return;
-
-            Console.WriteLine($"Inspecting: {Path.GetFileName(inputPath)}...");
-            try
-            {
-                using var archive = new GameArchive(inputPath);
-                var info = archive.GetPackageInfo();
-                
-                if (info.Magic != "GPCK") { Console.WriteLine("Invalid File"); return; }
-                
-                Console.WriteLine($"Version: {info.Version}");
-                Console.WriteLine($"File Count: {info.FileCount}");
-                Console.WriteLine($"Dependencies: {info.DependencyCount}");
-                Console.WriteLine(new string('-', 115));
-                Console.WriteLine($"{"File/Hash",-50} | {"Size",-8} | {"Align",-6} | {"Method",-15}");
-                Console.WriteLine(new string('-', 115));
-
-                int printed = 0;
-                foreach (var entry in info.Entries)
-                {
-                    if (printed++ > 50) 
+                    else
                     {
-                        Console.WriteLine($"... and {info.Entries.Count - 50} more files.");
-                        break;
+                        AnsiConsole.MarkupLine("[bold red]VERIFICATION FAILED[/]");
+                        return 1;
                     }
-
-                    string displayName = entry.Path;
-                    if (displayName.Length > 48)
-                    {
-                        displayName = "..." + displayName.Substring(displayName.Length - 45);
-                    }
-                    
-                    string align = entry.Alignment >= 1024 ? (entry.Alignment/1024) + "K" : entry.Alignment + "B";
-
-                    Console.WriteLine($"{displayName,-50} | {entry.OriginalSize / 1024.0:F1}KB | {align,-6} | {entry.Method,-15}");
-                }
-            }
-            catch(Exception ex) { PrintError(ex); }
+                });
         }
+    }
 
-        static void RunMount(string[] args)
+    public class InfoCommand : Command<InfoCommand.Settings>
+    {
+        public class Settings : CommandSettings { [CommandArgument(0, "<ARCHIVE>")] public string Archive { get; set; } = ""; }
+
+        public override int Execute(CommandContext context, Settings settings)
         {
-            if (args.Length < 3)
+            var info = new AssetPacker().InspectPackage(settings.Archive);
+
+            var grid = new Grid();
+            grid.AddColumn();
+            grid.AddColumn();
+            grid.AddRow("Version", info.Version.ToString());
+            grid.AddRow("Files", info.FileCount.ToString());
+            grid.AddRow("Total Size", $"{info.TotalSize / 1024.0 / 1024.0:F2} MB");
+
+            AnsiConsole.Write(new Panel(grid).Header("Archive Info"));
+
+            var table = new Table();
+            table.AddColumn("Path");
+            table.AddColumn("Size");
+            table.AddColumn("Comp %");
+            table.AddColumn("Method");
+
+            foreach(var e in info.Entries)
             {
-                Console.WriteLine("Usage: GPCK mount <base.gpck> <mod.gpck> ... --check <file_to_check>");
-                return;
+                double ratio = e.OriginalSize > 0 ? (double)e.CompressedSize / e.OriginalSize * 100 : 0;
+                table.AddRow(
+                    e.Path.Length > 50 ? "..." + e.Path.Substring(e.Path.Length-47) : e.Path,
+                    $"{e.OriginalSize/1024} KB",
+                    $"{ratio:F0}%",
+                    e.Method
+                );
             }
+            AnsiConsole.Write(table);
+            return 0;
+        }
+    }
 
-            var archives = new List<string>();
-            string? checkFile = null;
-
-            for (int i = 1; i < args.Length; i++)
-            {
-                if (args[i] == "--check" && i + 1 < args.Length)
-                {
-                    checkFile = args[i + 1];
-                    i++;
-                }
-                else
-                {
-                    archives.Add(args[i]);
-                }
-            }
-
-            Console.WriteLine("Initializing VFS...");
-            using var vfs = new VirtualFileSystem();
-
-            foreach (var arch in archives)
-            {
-                if (File.Exists(arch))
-                {
-                    Console.WriteLine($"Mounting: {Path.GetFileName(arch)}");
-                    vfs.Mount(arch);
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine($"Warning: Archive not found {arch}");
-                    Console.ResetColor();
-                }
-            }
-
-            if (checkFile != null)
-            {
-                Console.WriteLine($"\nResolving file: '{checkFile}'");
-                if (vfs.FileExists(checkFile))
-                {
-                    string source = vfs.GetSourceArchiveName(checkFile);
-                    PrintSuccess($"FOUND in: {source}");
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("File NOT FOUND in any mounted archive.");
-                    Console.ResetColor();
-                }
-            }
+    public class PatchCommand : AsyncCommand<PatchCommand.Settings>
+    {
+        public class Settings : CommandSettings
+        {
+            [CommandArgument(0, "<BASE>")] public string Base { get; set; } = "";
+            [CommandArgument(1, "<CONTENT>")] public string Content { get; set; } = "";
+            [CommandArgument(2, "<OUTPUT>")] public string Output { get; set; } = "";
         }
 
-        static bool ValidateInput(string path)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
         {
-            if (File.Exists(path) || Directory.Exists(path)) return true;
-            Console.WriteLine($"Error: Input not found: {path}");
-            return false;
-        }
+            AnsiConsole.MarkupLine($"Creating patch [bold]{settings.Output}[/] from [bold]{settings.Content}[/] against [bold]{settings.Base}[/]");
 
-        static string DeriveOutputPath(string input) => Directory.Exists(input) ? input + ".gpck" : Path.ChangeExtension(input, ".gpck");
+            var packer = new AssetPacker();
+            var map = AssetPacker.BuildFileMap(settings.Content);
 
-        static void ShowHelp()
-        {
-            Console.WriteLine("GPCK CLI Tool");
-            Console.WriteLine("Commands:");
-            Console.WriteLine("  compress <in> [out] [opts]       : Standard Pack");
-            Console.WriteLine("  patch <base> <new_dir> <out>     : Create Delta Patch Archive");
-            Console.WriteLine("  decompress <gpck> [outDir]       : Unpack All");
-            Console.WriteLine("  extract-file <gpck> <file>       : Unpack Single File");
-            Console.WriteLine("  verify <gpck>                    : Check integrity");
-            Console.WriteLine("  info <gpck>                      : Inspect Alignment & Deps");
-            Console.WriteLine("  mount <base> <mod> --check <f>   : Test VFS Layering");
-        }
-
-        static void PrintSuccess(string msg)
-        {
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine(msg);
-            Console.ResetColor();
-        }
-
-        static void PrintError(Exception ex)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Error: {ex.Message}");
-            Console.ResetColor();
+            await AnsiConsole.Progress().StartAsync(async ctx => {
+                var t = ctx.AddTask("Computing Deltas & Packing...");
+                await packer.CreatePatchArchiveAsync(settings.Base, map, settings.Output, 9, null, null, default);
+                t.Value = 100;
+            });
+            return 0;
         }
     }
 }

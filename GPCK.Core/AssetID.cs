@@ -1,65 +1,43 @@
 using System;
-using System.Security.Cryptography;
+using System.Buffers.Binary;
 using System.Text;
+using System.Runtime.InteropServices;
 
 namespace GPCK.Core
 {
     /// <summary>
     /// Represents a 128-bit Global Asset Identifier (GUID).
-    /// Used to decouple file paths from runtime resources.
+    /// Optimized to use XXHash64 for high-performance generation.
     /// </summary>
     public static class AssetIdGenerator
     {
-        // Namespace for Asset IDs (to ensure we don't collide with other GUIDs)
-        private static readonly Guid AssetNamespace = Guid.Parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8");
-
         /// <summary>
-        /// Generates a deterministic Type-5 UUID (SHA-1) from the file path.
-        /// This ensures the same path always produces the same AssetID.
+        /// Generates a deterministic GUID based on the file path using XXHash64.
+        /// Note: Standard GUID is 128-bit. We use two passes of XXHash64 (seeded) to fill it.
         /// </summary>
         public static Guid Generate(string path)
         {
             if (string.IsNullOrEmpty(path)) return Guid.Empty;
 
-            // Normalize path: Lowercase + Forward Slashes
+            // Normalize path
             string normalized = path.Replace('\\', '/').ToLowerInvariant();
-            byte[] nameBytes = Encoding.UTF8.GetBytes(normalized);
-            byte[] namespaceBytes = AssetNamespace.ToByteArray();
+            byte[] bytes = Encoding.UTF8.GetBytes(normalized);
 
-            // Swap to Network Byte Order (RFC 4122)
-            SwapByteOrder(namespaceBytes);
+            // Pass 1: Seed 0
+            ulong h1 = XxHash64.Compute(bytes, 0);
+            // Pass 2: Seed using h1
+            ulong h2 = XxHash64.Compute(bytes, h1);
 
-            // Compute SHA-1
-            using var sha1 = SHA1.Create();
-            sha1.TransformBlock(namespaceBytes, 0, namespaceBytes.Length, namespaceBytes, 0);
-            sha1.TransformFinalBlock(nameBytes, 0, nameBytes.Length);
-            byte[] hash = sha1.Hash!;
+            // Construct Guid from two 64-bit hashes
+            byte[] guidBytes = new byte[16];
+            BinaryPrimitives.WriteUInt64LittleEndian(guidBytes.AsSpan(0, 8), h1);
+            BinaryPrimitives.WriteUInt64LittleEndian(guidBytes.AsSpan(8, 8), h2);
 
-            byte[] newGuid = new byte[16];
-            Array.Copy(hash, 0, newGuid, 0, 16);
+            // Set UUID Version 4 (Random/Pseudo-Random) bits just to be valid GUID
+            guidBytes[6] = (byte)((guidBytes[6] & 0x0F) | (4 << 4));
+            guidBytes[8] = (byte)((guidBytes[8] & 0x3F) | 0x80);
 
-            // Set version to 5
-            newGuid[6] = (byte)((newGuid[6] & 0x0F) | (5 << 4));
-            // Set variant to RFC 4122
-            newGuid[8] = (byte)((newGuid[8] & 0x3F) | 0x80);
-
-            // Swap back to host order for .NET Guid struct
-            SwapByteOrder(newGuid);
-
-            return new Guid(newGuid);
-        }
-
-        private static void SwapByteOrder(byte[] guid)
-        {
-            Swap(guid, 0, 3);
-            Swap(guid, 1, 2);
-            Swap(guid, 4, 5);
-            Swap(guid, 6, 7);
-        }
-
-        private static void Swap(byte[] b, int i, int j)
-        {
-            (b[i], b[j]) = (b[j], b[i]);
+            return new Guid(guidBytes);
         }
     }
 }

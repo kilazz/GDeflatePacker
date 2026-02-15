@@ -8,66 +8,73 @@ using System.Threading.Tasks;
 namespace GPCK.Core
 {
     /// <summary>
-    /// High-Level Asset Manager (Graph Loader).
-    /// Mimics UE5/Frostbite loader.
+    /// High-Level Asset Manager.
+    /// Supports Generic loading for specific asset types (Texture, Text, etc).
     /// </summary>
     public class ResourceManager
     {
         private readonly VirtualFileSystem _vfs;
-        private readonly ConcurrentDictionary<Guid, Stream> _loadedResources = new();
+        private readonly ConcurrentDictionary<Guid, object> _loadedAssets = new();
 
         public ResourceManager(VirtualFileSystem vfs)
         {
             _vfs = vfs;
         }
 
-        public async Task<Stream> LoadAssetWithDependenciesAsync(string virtualPath, CancellationToken ct = default)
+        public async Task<T> LoadAssetAsync<T>(string virtualPath, CancellationToken ct = default) where T : class
         {
-            Guid rootId = AssetIdGenerator.Generate(virtualPath);
-            return await LoadAssetRecursive(rootId, ct);
+            Guid assetId = AssetIdGenerator.Generate(virtualPath);
+            return await LoadAssetRecursive<T>(assetId, ct);
         }
 
-        private async Task<Stream> LoadAssetRecursive(Guid assetId, CancellationToken ct)
+        private async Task<T> LoadAssetRecursive<T>(Guid assetId, CancellationToken ct) where T : class
         {
-            if (_loadedResources.TryGetValue(assetId, out var cachedStream))
-            {
-                cachedStream.Position = 0;
-                return cachedStream;
-            }
+            if (_loadedAssets.TryGetValue(assetId, out var cached)) return (T)cached;
 
             if (!_vfs.TryGetEntryForId(assetId, out var archive, out var entry))
-            {
-                throw new FileNotFoundException($"Asset {assetId} not found in any mounted archive.");
-            }
+                throw new FileNotFoundException($"Asset {assetId} not found.");
 
-            var dependencies = archive.GetDependenciesForAsset(assetId);
-            
-            if (dependencies.Count > 0)
+            // Dependencies
+            var deps = archive.GetDependenciesForAsset(assetId);
+            foreach(var dep in deps)
             {
-                var tasks = new List<Task>();
-                foreach(var dep in dependencies)
+                // Recursive load of hard references (simplified)
+                if (dep.Type == GameArchive.DependencyType.HardReference)
                 {
-                    if (dep.Type == GameArchive.DependencyType.HardReference)
-                    {
-                        tasks.Add(LoadAssetRecursive(dep.TargetAssetId, ct));
-                    }
-                }
-                
-                if (tasks.Count > 0)
-                {
-                    await Task.WhenAll(tasks);
+                    // Recursively load generic object for deps
+                    await LoadAssetRecursive<object>(dep.TargetAssetId, ct);
                 }
             }
 
-            Stream stream = await Task.Run(() => archive.OpenRead(entry), ct);
-            _loadedResources.TryAdd(assetId, stream);
-            return stream;
+            // Deserialization (Mocking real engine logic)
+            using var stream = archive.OpenRead(entry);
+            object? result = null;
+
+            if (typeof(T) == typeof(string))
+            {
+                using var reader = new StreamReader(stream);
+                result = await reader.ReadToEndAsync(ct);
+            }
+            else if (typeof(T) == typeof(byte[]))
+            {
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms, ct);
+                result = ms.ToArray();
+            }
+            else
+            {
+                // Fallback for unknown types (return as byte array or stream wrapper)
+                using var ms = new MemoryStream();
+                await stream.CopyToAsync(ms, ct);
+                result = ms.ToArray(); 
+            }
+
+            if (result == null) throw new InvalidOperationException($"Failed to load asset {assetId}");
+
+            _loadedAssets.TryAdd(assetId, result);
+            return (T)result;
         }
 
-        public void UnloadAll()
-        {
-            foreach(var s in _loadedResources.Values) s.Dispose();
-            _loadedResources.Clear();
-        }
+        public void UnloadAll() => _loadedAssets.Clear();
     }
 }

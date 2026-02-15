@@ -8,34 +8,38 @@ using Microsoft.Win32.SafeHandles;
 
 namespace GPCK.Core
 {
-    /// <summary>
-    /// Core Game Archive (.gpck).
-    /// Handles the binary structure, headers, and dependency tables.
-    /// </summary>
-    public unsafe class GameArchive : IDisposable
+    public class GameArchive : IDisposable
     {
         public const int Version = 1;
-        public const string Magic = "GPCK"; 
+        public const string MagicStr = "GPCK"; 
         private const int FileEntrySize = 44; 
 
         private readonly MemoryMappedFile _mmf;
         private readonly MemoryMappedViewAccessor _view;
-        private readonly byte* _basePtr;
-        private readonly long _fileLength;
         private readonly FileStream _dataFileStream;
 
-        private readonly int _fileCount;
-        private readonly int _dependencyCount;
-        
-        private readonly long _fileTableOffset;
-        private readonly long _nameTableOffset;
-        private readonly long _dependencyTableOffset;
+        private readonly ArchiveHeader _header;
 
         private Dictionary<Guid, List<DependencyEntry>>? _dependencyLookup;
 
         public string FilePath { get; }
-        public int FileCount => _fileCount;
+        public int FileCount => _header.FileCount;
         public byte[]? DecryptionKey { get; set; }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct ArchiveHeader
+        {
+            public int Magic; // "GPCK"
+            public int Version;
+            public int FileCount;
+            public int Padding1;
+            public int DependencyCount;
+            public int Padding2; // Align to 24
+            public long FileTableOffset;
+            public long Reserved;
+            public long NameTableOffset;
+            public long DependencyTableOffset;
+        }
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
         public struct FileEntry
@@ -96,70 +100,53 @@ namespace GPCK.Core
             FilePath = path;
             var fi = new FileInfo(path);
             if (!fi.Exists) throw new FileNotFoundException(path);
-            _fileLength = fi.Length;
+            long fileLength = fi.Length;
 
-            // Ensure we don't crash on empty/tiny files
-            if (_fileLength < 64) throw new InvalidDataException("File too short");
+            if (fileLength < Marshal.SizeOf<ArchiveHeader>()) throw new InvalidDataException("File too short");
 
             _mmf = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
             
-            // Open FileStream with Read Share to allow MMF to coexist if needed
             _dataFileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
 
-            byte* ptr = null;
-            _view.SafeMemoryMappedViewHandle.AcquirePointer(ref ptr);
-            _basePtr = ptr;
-            
-            if (_basePtr == null) throw new InvalidOperationException("Failed to acquire memory pointer.");
+            // Read Header safely
+            _view.Read(0, out _header);
 
-            ReadOnlySpan<byte> magicFn = new ReadOnlySpan<byte>(_basePtr, 4);
-            if (!magicFn.SequenceEqual(Encoding.ASCII.GetBytes(Magic)))
-                throw new InvalidDataException("Invalid Header. Expected GPCK.");
+            // Verify Magic
+            string magicRead = Encoding.ASCII.GetString(BitConverter.GetBytes(_header.Magic));
+            if (magicRead != MagicStr) throw new InvalidDataException($"Invalid Magic: {magicRead}");
+            if (_header.Version != Version) throw new NotSupportedException($"Version mismatch. Archive: {_header.Version}, Engine: {Version}");
 
-            int ver = *(int*)(_basePtr + 4);
-            if (ver != Version) throw new NotSupportedException($"Version mismatch. Archive: {ver}, Engine: {Version}");
-
-            _fileCount = *(int*)(_basePtr + 8);
-            _dependencyCount = *(int*)(_basePtr + 16);
-
-            _fileTableOffset = *(long*)(_basePtr + 24);
-            _nameTableOffset = *(long*)(_basePtr + 40);
-            _dependencyTableOffset = *(long*)(_basePtr + 48);
-            
-            // Validation
-            if (_fileTableOffset < 0 || _fileTableOffset >= _fileLength) throw new InvalidDataException("Invalid File Table Offset");
-            if (_fileCount < 0) throw new InvalidDataException("Invalid File Count");
+            // Validate offsets
+            if (_header.FileTableOffset < 0 || _header.FileTableOffset >= fileLength) throw new InvalidDataException("Invalid File Table Offset");
         }
 
         public FileEntry GetEntryByIndex(int index)
         {
-            if (index < 0 || index >= _fileCount) throw new IndexOutOfRangeException();
+            if (index < 0 || index >= FileCount) throw new IndexOutOfRangeException();
             
-            long offset = _fileTableOffset + ((long)index * FileEntrySize);
+            long offset = _header.FileTableOffset + ((long)index * FileEntrySize);
             
-            // Safety Check to prevent AccessViolation
-            if (offset < 0 || offset + FileEntrySize > _fileLength)
-            {
-                throw new InvalidDataException($"File Entry {index} is out of file bounds.");
-            }
-
-            byte* ptr = _basePtr + offset;
-            return *(FileEntry*)ptr;
+            FileEntry entry;
+            _view.Read(offset, out entry);
+            return entry;
         }
 
         public List<DependencyEntry> GetDependencies()
         {
-            var list = new List<DependencyEntry>(_dependencyCount);
-            if (_dependencyCount == 0 || _dependencyTableOffset == 0) return list;
+            int count = _header.DependencyCount;
+            var list = new List<DependencyEntry>(count);
+            if (count == 0 || _header.DependencyTableOffset == 0) return list;
 
-            // Safety
-            long size = (long)_dependencyCount * sizeof(DependencyEntry);
-            if (_dependencyTableOffset < 0 || _dependencyTableOffset + size > _fileLength)
-                 throw new InvalidDataException("Dependency Table out of bounds");
+            long offset = _header.DependencyTableOffset;
+            int step = Marshal.SizeOf<DependencyEntry>();
 
-            DependencyEntry* ptr = (DependencyEntry*)(_basePtr + _dependencyTableOffset);
-            for(int i=0; i<_dependencyCount; i++) list.Add(ptr[i]);
+            for(int i=0; i<count; i++)
+            {
+                DependencyEntry dep;
+                _view.Read(offset + (i * step), out dep);
+                list.Add(dep);
+            }
             return list;
         }
 
@@ -186,7 +173,7 @@ namespace GPCK.Core
         public bool TryGetEntry(Guid assetId, out FileEntry entry)
         {
             int left = 0;
-            int right = _fileCount - 1;
+            int right = FileCount - 1;
             while (left <= right)
             {
                 int mid = left + (right - left) / 2;
@@ -201,20 +188,22 @@ namespace GPCK.Core
 
         public string? GetPathForAssetId(Guid id)
         {
-            if (_nameTableOffset == 0) return null;
-            byte* ptr = _basePtr + _nameTableOffset;
-            byte* end = _basePtr + _fileLength;
-            
-            // Simple bound check on start
-            if (ptr < _basePtr || ptr >= end) return null;
+            if (_header.NameTableOffset == 0) return null;
 
-            for (int i = 0; i < _fileCount; i++)
+            // Safe implementation using View Accessor without raw pointers
+            // Note: This is slower than raw pointers but safer. For production tool, unsafe is fine, 
+            // but for this refactor we prioritize safety.
+            
+            long ptr = _header.NameTableOffset;
+            long end = _view.Capacity;
+
+            for (int i = 0; i < FileCount; i++)
             {
-                if (ptr >= end - 16) break; // Need at least 16 bytes for Guid
+                if (ptr >= end - 16) break; 
                 
                 // Read Guid
                 byte[] guidBytes = new byte[16];
-                Marshal.Copy((IntPtr)ptr, guidBytes, 0, 16);
+                _view.ReadArray(ptr, guidBytes, 0, 16);
                 Guid entryGuid = new Guid(guidBytes);
                 ptr += 16;
                 
@@ -224,14 +213,19 @@ namespace GPCK.Core
                 byte b;
                 do { 
                     if (ptr >= end) return null; 
-                    b = *ptr++; 
+                    b = _view.ReadByte(ptr++);
                     length |= (b & 0x7F) << shift; 
                     shift += 7; 
                 } while ((b & 0x80) != 0);
 
                 if (ptr + length > end) return null;
 
-                if (entryGuid == id) return Encoding.UTF8.GetString(ptr, length);
+                if (entryGuid == id) 
+                {
+                    byte[] strBytes = new byte[length];
+                    _view.ReadArray(ptr, strBytes, 0, length);
+                    return Encoding.UTF8.GetString(strBytes);
+                }
                 ptr += length;
             }
             return null;
@@ -248,21 +242,21 @@ namespace GPCK.Core
             var info = new PackageInfo
             {
                 FilePath = FilePath,
-                Magic = Magic,
+                Magic = MagicStr,
                 Version = Version,
-                FileCount = _fileCount,
-                TotalSize = _fileLength,
-                HasDebugNames = _nameTableOffset > 0,
-                DependencyCount = _dependencyCount
+                FileCount = FileCount,
+                TotalSize = _view.Capacity,
+                HasDebugNames = _header.NameTableOffset > 0,
+                DependencyCount = _header.DependencyCount
             };
 
-            for(int i=0; i < Math.Min(_fileCount, 2000); i++)
+            for(int i=0; i < Math.Min(FileCount, 5000); i++)
             {
                 var e = GetEntryByIndex(i);
                 uint methodMask = e.Flags & MASK_METHOD;
                 string methodStr = methodMask switch {
-                    METHOD_GDEFLATE => "GDeflate (GPU)",
-                    METHOD_ZSTD => "Zstd (CPU)",
+                    METHOD_GDEFLATE => "GDeflate",
+                    METHOD_ZSTD => "Zstd",
                     _ => "Store"
                 };
                 if ((e.Flags & FLAG_ENCRYPTED) != 0) methodStr += " [Enc]";
@@ -294,11 +288,7 @@ namespace GPCK.Core
 
         public void Dispose()
         {
-            if (_view != null)
-            {
-                _view.SafeMemoryMappedViewHandle.ReleasePointer();
-                _view.Dispose();
-            }
+            _view?.Dispose();
             _mmf?.Dispose();
             _dataFileStream?.Dispose();
         }
