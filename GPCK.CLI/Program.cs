@@ -2,6 +2,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using GPCK.Core;
 using Spectre.Console;
@@ -67,7 +68,7 @@ namespace GPCK.CLI
             public string? Key { get; set; }
         }
 
-        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
             string output = settings.Output ?? Path.ChangeExtension(settings.Input, ".gpck");
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
@@ -84,7 +85,7 @@ namespace GPCK.CLI
                     var progress = new Progress<int>(p => task.Value = p);
 
                     await packer.CompressFilesToArchiveAsync(
-                        map, output, true, settings.Level, keyBytes, settings.MipSplit, progress, default, settings.Method);
+                        map, output, true, settings.Level, keyBytes, settings.MipSplit, progress, cancellationToken, settings.Method);
                 });
 
             AnsiConsole.MarkupLine("[bold green]Done![/]");
@@ -106,7 +107,7 @@ namespace GPCK.CLI
             public string? Key { get; set; }
         }
 
-        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
             string outDir = settings.Output ?? Path.GetFileNameWithoutExtension(settings.Archive);
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
@@ -128,7 +129,7 @@ namespace GPCK.CLI
         }
     }
 
-    public class VerifyCommand : Command<VerifyCommand.Settings>
+    public class VerifyCommand : AsyncCommand<VerifyCommand.Settings>
     {
         public class Settings : CommandSettings
         {
@@ -138,7 +139,7 @@ namespace GPCK.CLI
             public string? Key { get; set; }
         }
 
-        public override int Execute(CommandContext context, Settings settings)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
             if (Directory.Exists(settings.Archive))
             {
@@ -154,10 +155,11 @@ namespace GPCK.CLI
 
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
 
-            return AnsiConsole.Status()
-                .Start("Verifying integrity...", ctx =>
+            return await AnsiConsole.Status()
+                .StartAsync("Verifying integrity...", async ctx =>
                 {
-                    bool result = new AssetPacker().VerifyArchive(settings.Archive, keyBytes);
+                    // Assuming VerifyArchive is blocking, we wrap it
+                    bool result = await Task.Run(() => new AssetPacker().VerifyArchive(settings.Archive, keyBytes), cancellationToken);
                     if (result)
                     {
                         AnsiConsole.MarkupLine("[bold green]VERIFICATION PASSED[/]");
@@ -172,11 +174,11 @@ namespace GPCK.CLI
         }
     }
 
-    public class InfoCommand : Command<InfoCommand.Settings>
+    public class InfoCommand : AsyncCommand<InfoCommand.Settings>
     {
         public class Settings : CommandSettings { [CommandArgument(0, "<ARCHIVE>")] public string Archive { get; set; } = ""; }
 
-        public override int Execute(CommandContext context, Settings settings)
+        public override Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
             var info = new AssetPacker().InspectPackage(settings.Archive);
 
@@ -206,7 +208,7 @@ namespace GPCK.CLI
                 );
             }
             AnsiConsole.Write(table);
-            return 0;
+            return Task.FromResult(0);
         }
     }
 
@@ -219,7 +221,7 @@ namespace GPCK.CLI
             [CommandArgument(2, "<OUTPUT>")] public string Output { get; set; } = "";
         }
 
-        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings)
+        public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
             AnsiConsole.MarkupLine($"Creating patch [bold]{settings.Output}[/] from [bold]{settings.Content}[/] against [bold]{settings.Base}[/]");
 
@@ -228,7 +230,7 @@ namespace GPCK.CLI
 
             await AnsiConsole.Progress().StartAsync(async ctx => {
                 var t = ctx.AddTask("Computing Deltas & Packing...");
-                await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, default);
+                await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, cancellationToken);
                 t.Value = 100;
             });
             return 0;

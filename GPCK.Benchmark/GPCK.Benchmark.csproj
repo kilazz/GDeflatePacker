@@ -1,15 +1,27 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
-		<TargetFramework>net10.0</TargetFramework>
+		<TargetFramework>net10.0-windows</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<PlatformTarget>x64</PlatformTarget>
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
 		<!-- Required for interacting with native compression pointers -->
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
 		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj"/>
-		<PackageReference Include="Spectre.Console" Version="0.49.1"/>
+		<PackageReference Include="Spectre.Console" Version="0.54.0"/>
+		<PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6"/>
+		<PackageReference Include="Microsoft.Direct3D.DirectStorage" Version="1.3.0">
+			<GeneratePathProperty>true</GeneratePathProperty>
+		</PackageReference>
 	</ItemGroup>
+	<!-- Ensure DirectStorage binaries are copied to the output directory -->
+	<Target Name="CopyDirectStorageBinaries" AfterTargets="Build">
+		<ItemGroup>
+			<DirectStorageBinaries Include="$(PkgMicrosoft_Direct3D_DirectStorage)\native\bin\x64\*.dll"/>
+		</ItemGroup>
+		<Copy SourceFiles="@(DirectStorageBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
+	</Target>
 </Project>
