@@ -1,7 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using GPCK.Core;
 using Spectre.Console;
 
@@ -83,7 +83,7 @@ namespace GPCK.Benchmark
 
             AnsiConsole.MarkupLine("\n[bold]Analysis:[/]");
             AnsiConsole.MarkupLine("- [blue]LZ4[/]: Fastest CPU decompression. Ideal for scripts/physics.");
-            AnsiConsole.MarkupLine("- [green]GDeflate[/]: Best texture compression ratio. 1-2 GB/s on CPU is just a fallback; on GPU this would be 10GB/s+.");
+            AnsiConsole.MarkupLine("- [green]GDeflate[/]: Best texture compression ratio. Decompression speed here is [u]CPU reference[/]. On a NVMe+GPU setup (DirectStorage), this would exceed 10,000 MB/s.");
             AnsiConsole.MarkupLine("- [cyan]Zstd[/]: Best ratio overall, but heavy on CPU. Use for Installers or Network packets.");
 
             AnsiConsole.WriteLine();
@@ -106,14 +106,26 @@ namespace GPCK.Benchmark
         {
             // --- Compression ---
             var sw = Stopwatch.StartNew();
-            byte[] compressed = compressor(input, level);
+            byte[] compressed;
+            try {
+                compressed = compressor(input, level);
+            } catch (Exception ex) {
+                AnsiConsole.MarkupLine($"[red]Error compressing {name}: {ex.Message}[/]");
+                return;
+            }
             sw.Stop();
+
             double compMb = (input.Length / 1024.0 / 1024.0);
             double compSec = sw.Elapsed.TotalSeconds;
             double compSpeed = compMb / compSec;
 
             // --- Decompression (Warmup) ---
-            decompressor(compressed, input.Length);
+            try {
+                decompressor(compressed, input.Length);
+            } catch (Exception ex) {
+                 AnsiConsole.MarkupLine($"[red]Error decompressing {name} (Warmup): {ex.Message}[/]");
+                 return;
+            }
 
             // --- Decompression (Real Test) ---
             sw.Restart();
@@ -197,25 +209,98 @@ namespace GPCK.Benchmark
 
         static byte[] CompressGDeflate(byte[] input, int level)
         {
-            ulong bound = CodecGDeflate.CompressBound((ulong)input.Length);
-            byte[] output = new byte[bound];
+            // FIX: GDeflate requires 64KB chunking (paging) to simulate DirectStorage correctly.
+            // Using a single large buffer causes "Malformed Stream" errors in the reference implementation.
+
+            using var ms = new MemoryStream();
+            using var bw = new BinaryWriter(ms);
+
+            int chunkSize = 65536; // 64KB Page Size
+            int numChunks = (input.Length + chunkSize - 1) / chunkSize;
+
+            // Header for benchmark purposes: [NumChunks] -> [Size1][Data1]...[SizeN][DataN]
+            bw.Write(numChunks);
+
+            byte[] scratch = new byte[CodecGDeflate.CompressBound((ulong)chunkSize)]; // Buffer for one chunk
+
             unsafe {
-                fixed(byte* pI = input, pO = output) {
-                    ulong outS = bound;
-                    CodecGDeflate.Compress(pO, ref outS, pI, (ulong)input.Length, (uint)level, 0);
-                    Array.Resize(ref output, (int)outS);
-                    return output;
+                fixed (byte* pInputBase = input)
+                fixed (byte* pScratch = scratch)
+                {
+                    for(int i=0; i<numChunks; i++)
+                    {
+                        int offset = i * chunkSize;
+                        int size = Math.Min(chunkSize, input.Length - offset);
+
+                        ulong outSize = (ulong)scratch.Length;
+
+                        // Compress 64KB chunk
+                        bool result = CodecGDeflate.Compress(
+                            pScratch,
+                            ref outSize,
+                            pInputBase + offset,
+                            (ulong)size,
+                            (uint)level,
+                            0 // flags
+                        );
+
+                        // If compression fails (expands data) or returns false, we store raw
+                        if (!result || outSize >= (ulong)size) {
+                            bw.Write(-1); // Marker for uncompressed
+                            bw.Write(size);
+                            var span = new ReadOnlySpan<byte>(input, offset, size);
+                            bw.Write(span);
+                        } else {
+                            bw.Write((int)outSize);
+                            var span = new ReadOnlySpan<byte>(scratch, 0, (int)outSize);
+                            bw.Write(span);
+                        }
+                    }
                 }
             }
+
+            return ms.ToArray();
         }
 
         static byte[] DecompressGDeflate(byte[] input, int outSize)
         {
             byte[] output = new byte[outSize];
+            using var ms = new MemoryStream(input);
+            using var br = new BinaryReader(ms);
+
+            int numChunks = br.ReadInt32();
+            int chunkSize = 65536;
+
             unsafe {
-                fixed(byte* pI = input, pO = output) {
-                    // Use 4 workers for CPU simulation
-                    CodecGDeflate.Decompress(pO, (ulong)outSize, pI, (ulong)input.Length, 4);
+                fixed (byte* pOutputBase = output)
+                {
+                    for(int i=0; i<numChunks; i++)
+                    {
+                        int cSize = br.ReadInt32();
+                        int expectedSize = Math.Min(chunkSize, outSize - (i * chunkSize));
+
+                        if (cSize == -1) {
+                            // Uncompressed fallback
+                            int rawSize = br.ReadInt32();
+                            byte[] raw = br.ReadBytes(rawSize);
+                            Marshal.Copy(raw, 0, (IntPtr)(pOutputBase + (i * chunkSize)), rawSize);
+                            continue;
+                        }
+
+                        byte[] compData = br.ReadBytes(cSize);
+
+                        fixed (byte* pIn = compData)
+                        {
+                             bool res = CodecGDeflate.Decompress(
+                                pOutputBase + (i * chunkSize),
+                                (ulong)expectedSize,
+                                pIn,
+                                (ulong)cSize,
+                                1 // Workers (CPU Reference)
+                            );
+                            if (!res) throw new Exception("GDeflate Chunk Decompression failed");
+                        }
+                    }
                 }
             }
             return output;
