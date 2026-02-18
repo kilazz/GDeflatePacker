@@ -74,11 +74,11 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        
+
         _processor = new AssetPacker();
         FileList.ItemsSource = _filteredFiles;
         VisualizerItems.ItemsSource = _blocks;
-        
+
         CheckBackend();
     }
 
@@ -86,9 +86,9 @@ public partial class MainWindow : Window
     {
         bool cpuAvailable = _processor.IsCpuLibraryAvailable();
         string status = $"CPU: {(cpuAvailable ? "Native" : ".NET")}";
-        
+
         // Try initialize Vulkan (Path B)
-        try 
+        try
         {
             _gpu = new VulkanDecompressor();
             status += $" | GPU: {_gpu.DeviceName} (Vulkan)";
@@ -97,7 +97,7 @@ public partial class MainWindow : Window
         {
             status += $" | GPU: Disabled ({ex.Message})";
         }
-        
+
         TxtBackendStatus.Text = status;
     }
 
@@ -155,15 +155,15 @@ public partial class MainWindow : Window
                     // Visualizer
                     double w = Math.Max(2.0, entry.CompressedSize * scale);
                     if (w > 100) w = 100;
-                    
+
                     IBrush color = Brushes.LightGray;
                     if (entry.Method.Contains("GDeflate")) color = Brushes.LightGreen;
                     else if (entry.Method.Contains("Zstd")) color = Brushes.LightBlue;
                     else if (entry.Method.Contains("LZ4")) color = Brushes.Orange;
 
-                    _blocks.Add(new BlockItem 
-                    { 
-                        Width = w, 
+                    _blocks.Add(new BlockItem
+                    {
+                        Width = w,
                         Color = color,
                         ToolTip = $"{entry.Path}\n{entry.Method}"
                     });
@@ -195,7 +195,8 @@ public partial class MainWindow : Window
             await Task.Run(() => {
                 var map = AssetPacker.BuildFileMap(path);
                 Dispatcher.UIThread.Post(() => {
-                    foreach (var kv in map) AddFileItem(kv.Key);
+                    // Pass key (full path) and value (relative path)
+                    foreach (var kv in map) AddFileItem(kv.Key, kv.Value);
                     RefreshFilter();
                     UpdateStatus("Folder added.");
                 });
@@ -203,13 +204,14 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AddFileItem(string path)
+    private void AddFileItem(string path, string? relativePath = null)
     {
+        string rel = relativePath ?? Path.GetFileName(path);
         _files.Add(new FileItem
         {
             FilePath = path,
-            RelativePath = Path.GetFileName(path),
-            AssetId = AssetIdGenerator.Generate(Path.GetFileName(path)),
+            RelativePath = rel,
+            AssetId = AssetIdGenerator.Generate(rel),
             Size = "Pending"
         });
     }
@@ -228,10 +230,10 @@ public partial class MainWindow : Window
     {
         if (sender is not Button btn) return;
         bool isExplorer = btn == TabExplorer;
-        
+
         ExplorerView.IsVisible = isExplorer;
         VisualizerView.IsVisible = !isExplorer;
-        
+
         TabExplorer.Classes.Set("Selected", isExplorer);
         TabVisualizer.Classes.Set("Selected", !isExplorer);
     }
@@ -251,7 +253,7 @@ public partial class MainWindow : Window
     {
         if (FileList.SelectedItem is not FileItem item) return;
         ResetPreview();
-        
+
         try
         {
             Stream? s = GetStream(item);
@@ -306,7 +308,7 @@ public partial class MainWindow : Window
         if (saveFile == null) return;
 
         var map = _files.Where(x => !x.IsArchiveEntry).DistinctBy(x => x.FilePath).ToDictionary(x => x.FilePath, x => x.RelativePath);
-        
+
         string methodStr = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
         Enum.TryParse(methodStr, out AssetPacker.CompressionMethod method);
 
@@ -349,7 +351,7 @@ public partial class MainWindow : Window
         ProgressBar.IsVisible = true;
         ProgressBar.Value = 0;
         BtnCompress.IsEnabled = false;
-        
+
         try
         {
             await action(_cts.Token, new Progress<int>(v => Dispatcher.UIThread.Post(() => ProgressBar.Value = v)));
