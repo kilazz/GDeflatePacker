@@ -7,25 +7,19 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
-		<Content Include="libs\GDeflate.dll">
-			<Link>GDeflate.dll</Link>
+		<!-- 
+            Native Libraries Configuration
+            Structure: runtimes/{rid}/native/{lib}
+            This allows .NET to automatically load the correct library for the OS/Arch.
+        -->
+		<Content Include="runtimes\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Pack>true</Pack>
-			<PackagePath>contentFiles\any\any</PackagePath>
-		</Content>
-		<Content Include="libs\libzstd.dll">
-			<Link>libzstd.dll</Link>
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<Pack>true</Pack>
-		</Content>
-		<Content Include="libs\liblz4.dll">
-			<Link>liblz4.dll</Link>
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<Pack>true</Pack>
+			<PackagePath>contentFiles\any\any\runtimes</PackagePath>
 		</Content>
 	</ItemGroup>
 	<ItemGroup>
-		<PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
-		<PackageReference Include="Silk.NET.Core" Version="2.23.0" />
+		<PackageReference Include="Silk.NET.Vulkan" Version="2.23.0"/>
+		<PackageReference Include="Silk.NET.Core" Version="2.23.0"/>
 	</ItemGroup>
 </Project>

@@ -7,32 +7,30 @@ namespace GPCK.Core
 {
     public static class CodecGDeflate
     {
-        private const string DllName = "GDeflate.dll";
+        private const string DllName = "GDeflate";
 
         static CodecGDeflate()
         {
-            NativeLibrary.SetDllImportResolver(typeof(CodecGDeflate).Assembly, CustomDllResolver);
-        }
-
-        private static IntPtr CustomDllResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
-        {
-            if (libraryName == DllName)
-            {
-                string root = AppContext.BaseDirectory;
-                string rootPath = Path.Combine(root, DllName);
-                if (File.Exists(rootPath) && NativeLibrary.TryLoad(rootPath, out IntPtr rootHandle)) return rootHandle;
-
-                string libsPath = Path.Combine(root, "libs", DllName);
-                if (File.Exists(libsPath) && NativeLibrary.TryLoad(libsPath, out IntPtr libsHandle)) return libsHandle;
-
-                if (NativeLibrary.TryLoad(libraryName, assembly, searchPath, out IntPtr defaultHandle)) return defaultHandle;
-            }
-            return IntPtr.Zero;
+            // With the standard 'runtimes/win-x64/native/' structure,
+            // .NET handles resolution automatically. Custom resolver removed.
         }
 
         public static bool IsAvailable()
         {
-            return NativeLibrary.TryLoad(DllName, typeof(CodecGDeflate).Assembly, null, out IntPtr handle) && handle != IntPtr.Zero;
+            try
+            {
+                // Verify we can resolve the bound function
+                CompressBound(0);
+                return true;
+            }
+            catch (DllNotFoundException)
+            {
+                return false;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompressBound")]

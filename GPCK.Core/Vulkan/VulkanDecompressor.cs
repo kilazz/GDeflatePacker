@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
+using Buffer = Silk.NET.Vulkan.Buffer;
 
 namespace GPCK.Core.Vulkan
 {
@@ -267,9 +268,11 @@ namespace GPCK.Core.Vulkan
                     CodeSize = (nuint)shaderCode.Length,
                     PCode = (uint*)pCode
                 };
-                fixed (ShaderModule* pModule = &shaderModule)
+
+                // ShaderModule is a struct on the stack, no need to pin.
+                if (_vk.CreateShaderModule(_device, &shaderInfo, null, &shaderModule) != Result.Success)
                 {
-                    _vk.CreateShaderModule(_device, &shaderInfo, null, pModule);
+                    throw new Exception("Failed to create shader module");
                 }
             }
 
@@ -452,8 +455,18 @@ namespace GPCK.Core.Vulkan
                 SharingMode = SharingMode.Exclusive
             };
 
+            // buffer is an out param (stack variable), no need to fix
             fixed (Buffer* pBuffer = &buffer)
-                _vk.CreateBuffer(_device, &bufferInfo, null, pBuffer);
+            {
+                // Wait, buffer is on stack, can't fix stack variables using fixed statement.
+                // However, Silk.NET CreateBuffer takes a pointer.
+                // We should just pass the address.
+                // NOTE: Using a local variable 'localBuffer' inside fixed block is cleaner if out param causes issues,
+                // but simply passing &buffer works in unsafe context if we don't use 'fixed'.
+            }
+
+            // Correct approach for out parameter in unsafe context:
+            _vk.CreateBuffer(_device, &bufferInfo, null, out buffer);
 
             MemoryRequirements memReq;
             _vk.GetBufferMemoryRequirements(_device, buffer, &memReq);
@@ -465,8 +478,7 @@ namespace GPCK.Core.Vulkan
                 MemoryTypeIndex = FindMemoryType(memReq.MemoryTypeBits, properties)
             };
 
-            fixed (DeviceMemory* pMem = &memory)
-                _vk.AllocateMemory(_device, &allocInfo, null, pMem);
+            _vk.AllocateMemory(_device, &allocInfo, null, out memory);
 
             _vk.BindBufferMemory(_device, buffer, memory, 0);
         }
