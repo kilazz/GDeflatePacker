@@ -51,7 +51,8 @@ namespace GPCK.Core
                 progress?.Report((int)(Interlocked.Increment(ref count) / (float)fileMap.Count * 80));
             });
 
-            await WriteArchive(processed.OrderBy(f => f.AssetId).ToList(), outputPath, enableDedup, key, progress);
+            // Sort by OriginalPath to ensure files in the same folder are physically adjacent in the archive (Data Locality).
+            await WriteArchive(processed.OrderBy(f => f.OriginalPath, StringComparer.OrdinalIgnoreCase).ToList(), outputPath, enableDedup, key, progress);
         }
 
         private async ValueTask ProcessFile(string input, string rel, int level, byte[]? key, bool mipSplit, CompressionMethod force, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
@@ -180,6 +181,7 @@ namespace GPCK.Core
             bw.Seek(64, SeekOrigin.Begin);
 
             // 3. Pre-calculate offsets with deduplication
+            // Note: 'files' is sorted by Path for Data Locality.
             var contentMap = new Dictionary<ulong, long>();
             var uniqueDataToWrite = new List<(ProcessedFile File, long Offset)>();
             long currentDataPtr = dataStartOffset;
@@ -213,8 +215,12 @@ namespace GPCK.Core
                 finalEntries.Add((f, offset));
             }
 
+            // CRITICAL: The File Table MUST be sorted by AssetId because the reader (GameArchive)
+            // uses Binary Search to find files. The Data blocks can remain sorted by Path for locality.
+            var tableEntries = finalEntries.OrderBy(x => x.File.AssetId).ToList();
+
             // 4. Write File Table
-            foreach (var (f, offset) in finalEntries)
+            foreach (var (f, offset) in tableEntries)
             {
                 bw.Write(f.AssetId.ToByteArray());
                 bw.Write(offset);
@@ -226,7 +232,8 @@ namespace GPCK.Core
             }
 
             // 5. Write Name Table
-            foreach (var f in files)
+            // Sorting Name Table by AssetId is cleaner and keeps it consistent with File Table index.
+            foreach (var (f, _) in tableEntries)
             {
                 bw.Write(f.AssetId.ToByteArray());
                 byte[] n = Encoding.UTF8.GetBytes(f.OriginalPath);
@@ -234,7 +241,7 @@ namespace GPCK.Core
                 bw.Write(n);
             }
 
-            // 6. Write Data Blocks
+            // 6. Write Data Blocks (in the order optimized for locality)
             progress?.Report(90);
             foreach (var (f, offset) in uniqueDataToWrite)
             {
@@ -255,6 +262,29 @@ namespace GPCK.Core
                 }
             }
         }
-        public bool VerifyArchive(string path, byte[]? key) { try { using var arch = new GameArchive(path) { DecryptionKey = key }; for(int i=0; i<arch.FileCount; i++) { using var s = arch.OpenRead(arch.GetEntryByIndex(i)); s.CopyTo(Stream.Null); } return true; } catch { return false; } }
+
+        // Multi-threaded verification using RandomAccess for NVMe speeds.
+        public bool VerifyArchive(string path, byte[]? key)
+        {
+            try
+            {
+                using var arch = new GameArchive(path) { DecryptionKey = key };
+                bool allGood = true;
+
+                Parallel.For(0, arch.FileCount, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, (i, state) =>
+                {
+                    try {
+                        using var s = arch.OpenRead(arch.GetEntryByIndex(i));
+                        s.CopyTo(Stream.Null);
+                    } catch {
+                        allGood = false;
+                        state.Stop();
+                    }
+                });
+
+                return allGood;
+            }
+            catch { return false; }
+        }
     }
 }

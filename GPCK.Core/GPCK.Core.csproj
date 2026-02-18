@@ -4,7 +4,6 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<RootNamespace>GPCK.Core</RootNamespace>
-		<!-- Required for pointers and NativeMemory -->
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
@@ -14,17 +13,19 @@
 			<Pack>true</Pack>
 			<PackagePath>contentFiles\any\any</PackagePath>
 		</Content>
-		<!-- Assume user provides libzstd.dll for CPU compression -->
 		<Content Include="libs\libzstd.dll">
 			<Link>libzstd.dll</Link>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Pack>true</Pack>
 		</Content>
-		<!-- Assume user provides liblz4.dll for Fast CPU compression -->
 		<Content Include="libs\liblz4.dll">
 			<Link>liblz4.dll</Link>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<Pack>true</Pack>
 		</Content>
+	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Silk.NET.Vulkan" Version="2.21.0" />
+		<PackageReference Include="Silk.NET.Core" Version="2.21.0" />
 	</ItemGroup>
 </Project>

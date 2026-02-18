@@ -1,35 +1,39 @@
-# GPCK Toolsuite
+# GPCK (Game Package Construction Kit)
 
-**GPCK** is a high-performance asset management system (.NET 10.0) featuring **GDeflate** (DirectStorage) & **Zstd** compression, encryption, deduplication, and Virtual File System (VFS).
+**Next-Gen Asset Management System for .NET 10**
 
-## 🚀 CLI Commands
+High-performance archive format leveraging **DirectStorage**, **GDeflate** (GPU decompression), and NVMe optimizations.
 
-```powershell
-# Pack / Unpack
-GPCK compress <in_dir> <out.gpck> [--level 9] [--mip-split] [--key <secret>]
-GPCK decompress <in.gpck> <out_dir> [--key <secret>]
+## 🚀 Features
+*   **Compression:** GDeflate (GPU optimized), Zstd (High Ratio), LZ4 (Low Latency).
+*   **Architecture:** DirectStorage alignment (4KB/64KB), xxHash64 indexing, and AES-GCM encryption.
+*   **Optimized:** Data locality for sequential reads and automatic texture streaming (mip-splitting).
+*   **Smart Packing:** Content-addressable deduplication.
 
-# Single File / Patching
-GPCK extract-file <in.gpck> <file_path> <out_dir>
-GPCK patch <base.gpck> <new_content_dir> <patch.gpck>
+## 🛠️ Components
+*   **GPCK.Core:** Core library with Virtual File System (VFS) and multithreaded I/O.
+*   **GPCK.Avalonia:** Cross-platform GUI for packing, inspecting, and visualizing archives.
+*   **GPCK.CLI:** Headless tool for build pipelines.
+*   **GPCK.Benchmark:** Decompression throughput testing harness.
 
-# Diagnostics
-GPCK info <in.gpck>                # View alignment & compression stats
-GPCK verify <in.gpck>              # CRC32 integrity check
-GPCK mount <a.gpck> <b.gpck> ...   # Test VFS layering
+## 📦 Usage
+
+### CLI
+```bash
+# Pack
+GPCK.CLI.exe compress "C:\Assets" "Data.gpck" --method Auto --level 9
+
+# Unpack
+GPCK.CLI.exe decompress "Data.gpck" "Output"
 ```
 
-## 🖥️ GUI
+### GUI
+Run `GPCK.Avalonia.exe` to browse archives, view fragmentation maps, or pack folders via the UI.
 
-The **GPCK.GUI** (WPF) allows for:
-*   Visual inspection of archive structure and compression ratios.
-*   **Previews** for Textures, Text, and Hex.
-*   Drag-and-drop Packing and Extraction.
-
-## 🛠 Build
-
-Requires **Windows x64** and **.NET 10.0**.
+## 🔧 Build
+Requires **.NET 10 SDK**.
 
 ```bash
 dotnet build -c Release
 ```
+*Ensure native libraries (`dstorage.dll`, `GDeflate.dll`, `libzstd.dll`) are present in the output.*
