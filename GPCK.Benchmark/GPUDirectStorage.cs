@@ -19,6 +19,7 @@ namespace GPCK.Benchmark
         public const uint DSTORAGE_COMPRESSION_FORMAT_GDEFLATE = 1;
         public const ushort DSTORAGE_MAX_QUEUE_CAPACITY = 0x2000;
         public const ushort DSTORAGE_MIN_QUEUE_CAPACITY = 128;
+        public const int DSTORAGE_STAGING_BUFFER_SIZE_32MB = 32 * 1024 * 1024;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -153,22 +154,51 @@ namespace GPCK.Benchmark
         }
     }
 
+    // DXGI Helper structures for manual adapter selection
+    [Guid("770aae78-f26f-4dba-a829-253c83d1b387")]
+    internal unsafe struct IDXGIFactory1
+    {
+#pragma warning disable 0649
+        public void** lpVtbl;
+#pragma warning restore 0649
+        public int EnumAdapters1(uint Adapter, IDXGIAdapter1** ppAdapter) {
+            return ((delegate* unmanaged[Stdcall]<IDXGIFactory1*, uint, IDXGIAdapter1**, int>)lpVtbl[7])((IDXGIFactory1*)Unsafe.AsPointer(ref this), Adapter, ppAdapter);
+        }
+        public uint Release() {
+            return ((delegate* unmanaged[Stdcall]<IDXGIFactory1*, uint>)lpVtbl[2])((IDXGIFactory1*)Unsafe.AsPointer(ref this));
+        }
+    }
+
+    [Guid("29038f61-3839-4626-91fd-086879011a05")]
+    internal unsafe struct IDXGIAdapter1
+    {
+#pragma warning disable 0649
+        public void** lpVtbl;
+#pragma warning restore 0649
+        public int GetDesc1(DXGI_ADAPTER_DESC1* pDesc) {
+            return ((delegate* unmanaged[Stdcall]<IDXGIAdapter1*, DXGI_ADAPTER_DESC1*, int>)lpVtbl[10])((IDXGIAdapter1*)Unsafe.AsPointer(ref this), pDesc);
+        }
+        public uint Release() {
+            return ((delegate* unmanaged[Stdcall]<IDXGIAdapter1*, uint>)lpVtbl[2])((IDXGIAdapter1*)Unsafe.AsPointer(ref this));
+        }
+    }
+
     public unsafe class GpuDirectStorage : IDisposable
     {
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern IntPtr LoadLibraryW(string lpFileName);
+        // 0x887A0002 is DXGI_ERROR_NOT_FOUND
+        private const int DXGI_ERROR_NOT_FOUND = unchecked((int)0x887A0002);
 
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool SetDllDirectoryW(string lpPathName);
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibraryW(string lpLibFileName);
 
-        [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Ansi)]
-        private static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+        [DllImport("dstorage.dll", EntryPoint = "DStorageSetConfiguration1", ExactSpelling = true)]
+        private static extern int DStorageSetConfiguration1(DSTORAGE_CONFIGURATION1* config);
 
-        [DllImport("kernel32", SetLastError = true)]
-        private static extern bool FreeLibrary(IntPtr hModule);
+        [DllImport("dstorage.dll", EntryPoint = "DStorageGetFactory", ExactSpelling = true)]
+        private static extern int DStorageGetFactory(Guid* riid, void** ppv);
 
-        private delegate int DStorageGetFactoryDelegate(Guid* riid, void** ppv);
-        private delegate int DStorageSetConfiguration1Delegate(DSTORAGE_CONFIGURATION1* config);
+        [DllImport("dxgi", SetLastError = true)]
+        private static extern int CreateDXGIFactory1(Guid* riid, void** ppFactory);
 
         private ComPtr<ID3D12Device> _device;
         private IDStorageFactory* _factory = null;
@@ -177,130 +207,157 @@ namespace GPCK.Benchmark
         private ulong _fenceValue = 0;
         private HANDLE _fenceEvent;
 
-        private IntPtr _hDStorage;
-
         public bool IsSupported { get; private set; } = false;
         public bool IsHardwareAccelerated { get; private set; } = false;
         public string InitError { get; private set; } = "";
+
+        // Static initializer to configure DirectStorage exactly once before any factory is created
+        static GpuDirectStorage()
+        {
+            try
+            {
+                // Preload compiler to avoid DSTORAGE_ERROR_CORE_INIT_FAILED (0x89240003)
+                // when falling back to software compute shader for decompression.
+                LoadLibraryW("d3dcompiler_47.dll");
+                LoadLibraryW("dxil.dll");
+
+                // "Safe Mode" Configuration for DirectStorage
+                DSTORAGE_CONFIGURATION1 config = new DSTORAGE_CONFIGURATION1();
+
+                config.NumSubmitThreads = 1;
+                config.NumBuiltInCpuDecompressionThreads = 0; // Auto
+
+                config.ForceLegacyMapping = 1; // BypassIO can fail on some systems
+                config.DisableBypassIO = 1;
+
+                config.DisableTelemetry = 1;
+
+                // 0 = Enable Driver Optimization (Metacommand). 1 = Force Compute Shader.
+                // We try 0 first to use HW acceleration on RX 6600.
+                // If it fails with 0x89240003, it means fallback failed too (due to missing DLLs above).
+                config.DisableGpuDecompressionMetacommand = 0;
+
+                config.DisableGpuDecompressionSystemMemoryFallback = 0;
+
+                DStorageSetConfiguration1(&config);
+            }
+            catch
+            {
+                // If dll is missing, it will be caught in constructor
+            }
+        }
 
         public GpuDirectStorage()
         {
             try
             {
-                string baseDir = AppContext.BaseDirectory;
-                string dllPath = Path.Combine(baseDir, "dstorage.dll");
-                string corePath = Path.Combine(baseDir, "dstoragecore.dll");
-
-                if (!File.Exists(dllPath)) { InitError = "dstorage.dll missing"; return; }
-                if (!File.Exists(corePath)) { InitError = "dstoragecore.dll missing"; return; }
-
-                // 1. Setup DLL Directory
-                SetDllDirectoryW(baseDir);
-
-                // 2. Load dstorage.dll
-                _hDStorage = LoadLibraryW(dllPath);
-
-                if (_hDStorage == IntPtr.Zero)
-                {
-                    InitError = $"Failed to load dstorage.dll (Win32 Error: {Marshal.GetLastWin32Error()})";
-                    return;
-                }
-
-                // 3. Configure DirectStorage
-                IntPtr pSetConfig = GetProcAddress(_hDStorage, "DStorageSetConfiguration1");
-                if (pSetConfig != IntPtr.Zero)
-                {
-                    var setConfig = Marshal.GetDelegateForFunctionPointer<DStorageSetConfiguration1Delegate>(pSetConfig);
-                    DSTORAGE_CONFIGURATION1 config = new DSTORAGE_CONFIGURATION1();
-
-                    config.NumSubmitThreads = 0;
-                    config.NumBuiltInCpuDecompressionThreads = 0;
-                    config.ForceLegacyMapping = 1; // REQUIRED for compatibility
-                    config.DisableBypassIO = 1;    // REQUIRED to fix Core Init Failed (0x89240003)
-                    config.DisableTelemetry = 1;
-                    config.DisableGpuDecompressionMetacommand = 1; // Fallback to shader to avoid driver issues
-                    config.DisableGpuDecompressionSystemMemoryFallback = 0;
-
-                    int hrConfig = setConfig(&config);
-                    // Ignore config error, as it might just warn on some systems
-                }
-
-                // 4. Get Factory
-                IntPtr pGetFactory = GetProcAddress(_hDStorage, "DStorageGetFactory");
-                if (pGetFactory == IntPtr.Zero) { InitError = "DStorageGetFactory export not found"; return; }
-                var getFactory = Marshal.GetDelegateForFunctionPointer<DStorageGetFactoryDelegate>(pGetFactory);
-
-                // 5. Init Factory
+                // 1. Get Factory
                 Guid uuidFactory = new Guid("6924ea0c-c3cd-4826-b10a-f64f4ed927c1");
                 int hrFactory;
                 fixed(IDStorageFactory** ppFactory = &_factory)
                 {
-                    hrFactory = getFactory(&uuidFactory, (void**)ppFactory);
+                    hrFactory = DStorageGetFactory(&uuidFactory, (void**)ppFactory);
                 }
 
                 if (FAILED(hrFactory))
                 {
-                    InitError = $"Failed to get DStorage Factory (0x{hrFactory:X})";
+                    InitError = $"Failed to get DStorage Factory (0x{hrFactory:X}). Ensure dstorage.dll is in the output folder.";
                     return;
                 }
 
-                // 6. Debug Flags & Staging
-                _factory->SetDebugFlags(0x1); // Show Errors
+                // 2. Debug Flags & Staging
+                _factory->SetDebugFlags(0);
 
-                // CRITICAL FIX: Set Staging Buffer Size.
-                // For DSTORAGE_REQUEST_SOURCE_MEMORY, a staging buffer is mandatory for CPU->GPU upload.
-                // If not set, it defaults to 0 or 32MB depending on version, but explicit setting fixes initialization errors.
-                _factory->SetStagingBufferSize(128 * 1024 * 1024); // 128MB
+                // Use 32MB Staging Buffer.
+                _factory->SetStagingBufferSize(DStorageConstants.DSTORAGE_STAGING_BUFFER_SIZE_32MB);
 
-                // 7. Create D3D12 Device
+                // 3. Create D3D12 Device (Explicitly Select High Performance Adapter)
+                IDXGIFactory1* pDXGIFactory = null;
+                Guid uuidDxgi = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
+
+                CreateDXGIFactory1(&uuidDxgi, (void**)&pDXGIFactory);
+
+                IDXGIAdapter1* pAdapter = null;
+                IDXGIAdapter1* pBestAdapter = null;
+                nuint maxVideoMemory = 0;
+
+                if (pDXGIFactory != null)
+                {
+                    uint i = 0;
+                    while (pDXGIFactory->EnumAdapters1(i, &pAdapter) != DXGI_ERROR_NOT_FOUND)
+                    {
+                        DXGI_ADAPTER_DESC1 desc;
+                        pAdapter->GetDesc1(&desc);
+
+                        if ((desc.Flags & 2) == 0) // Skip Software
+                        {
+                            if (desc.DedicatedVideoMemory > maxVideoMemory)
+                            {
+                                if (pBestAdapter != null) pBestAdapter->Release();
+                                pBestAdapter = pAdapter;
+                                maxVideoMemory = desc.DedicatedVideoMemory;
+                            }
+                            else
+                            {
+                                pAdapter->Release();
+                            }
+                        }
+                        else
+                        {
+                            pAdapter->Release();
+                        }
+                        i++;
+                    }
+                    pDXGIFactory->Release();
+                }
+
                 Guid uuidDevice = typeof(ID3D12Device).GUID;
-                int hrDevice = D3D12CreateDevice(null, D3D_FEATURE_LEVEL.D3D_FEATURE_LEVEL_12_0, &uuidDevice, (void**)_device.GetAddressOf());
-                bool deviceReady = SUCCEEDED(hrDevice);
+                int hrDevice = D3D12CreateDevice((IUnknown*)pBestAdapter, D3D_FEATURE_LEVEL.D3D_FEATURE_LEVEL_12_0, &uuidDevice, (void**)_device.GetAddressOf());
 
-                // 8. Create Queue
+                if (pBestAdapter != null) pBestAdapter->Release();
+
+                if (FAILED(hrDevice))
+                {
+                    InitError = $"Failed to create D3D12 Device (0x{hrDevice:X})";
+                    return;
+                }
+
+                // 4. Check Wave Intrinsics (Required for GDeflate)
+                D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1 = new D3D12_FEATURE_DATA_D3D12_OPTIONS1();
+                _device.Get()->CheckFeatureSupport(D3D12_FEATURE.D3D12_FEATURE_D3D12_OPTIONS1, &options1, (uint)sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS1));
+
+                if (options1.WaveOps == 0)
+                {
+                    InitError = "GPU does not support Wave Intrinsics (required for GDeflate).";
+                    return;
+                }
+
+                // 5. Create Queue
                 Guid uuidQueue = new Guid("cfdbd83f-9e06-4fda-83ef-647f42b59529");
                 int hrQueue = -1;
 
-                if (deviceReady)
+                // Try creating with max capacity
+                if (TryCreateQueue(DStorageConstants.DSTORAGE_MAX_QUEUE_CAPACITY, (IntPtr)_device.Get(), uuidQueue, out hrQueue))
                 {
-                    if (TryCreateQueue(DStorageConstants.DSTORAGE_MAX_QUEUE_CAPACITY, (IntPtr)_device.Get(), uuidQueue, out hrQueue))
-                    {
-                        IsHardwareAccelerated = true;
-                        goto QueueCreated;
-                    }
-                }
-
-                IntPtr devicePtr = deviceReady ? (IntPtr)_device.Get() : IntPtr.Zero;
-                if (TryCreateQueue(DStorageConstants.DSTORAGE_MIN_QUEUE_CAPACITY, devicePtr, uuidQueue, out hrQueue))
-                {
-                    IsHardwareAccelerated = false;
-                    goto QueueCreated;
-                }
-
-                InitError = $"Failed to create DStorage Queue (HR: 0x{hrQueue:X}). Core init failed.";
-                return;
-
-            QueueCreated:
-
-                // 9. Create Fence
-                Guid uuidFence = typeof(ID3D12Fence).GUID;
-                int hrFence;
-
-                if (deviceReady)
-                {
-                     hrFence = _device.Get()->CreateFence(0, D3D12_FENCE_FLAGS.D3D12_FENCE_FLAG_NONE, &uuidFence, (void**)_fence.GetAddressOf());
+                    IsHardwareAccelerated = true;
                 }
                 else
                 {
-                    InitError = "D3D12 Device required for Fence creation.";
-                    return;
+                    // Fallback: Try smaller queue capacity
+                    if (TryCreateQueue(DStorageConstants.DSTORAGE_MIN_QUEUE_CAPACITY, (IntPtr)_device.Get(), uuidQueue, out hrQueue))
+                    {
+                        IsHardwareAccelerated = true;
+                    }
+                    else
+                    {
+                        InitError = $"Failed to create Hardware DStorage Queue (HR: 0x{hrQueue:X}).\nEnsure 'd3dcompiler_47.dll' is present for shader compilation.";
+                        return;
+                    }
                 }
 
-                if (FAILED(hrFence))
-                {
-                    InitError = $"Failed to create Fence (0x{hrFence:X})";
-                    return;
-                }
+                // 6. Create Fence
+                Guid uuidFence = typeof(ID3D12Fence).GUID;
+                _device.Get()->CreateFence(0, D3D12_FENCE_FLAGS.D3D12_FENCE_FLAG_NONE, &uuidFence, (void**)_fence.GetAddressOf());
 
                 _fenceEvent = CreateEventW(null, FALSE, FALSE, null);
                 IsSupported = true;
@@ -445,7 +502,6 @@ namespace GPCK.Benchmark
             if (_fenceEvent.Value != null) CloseHandle(_fenceEvent);
             if (_queue != null) { _queue->Release(); _queue = null; }
             if (_factory != null) { _factory->Release(); _factory = null; }
-            if (_hDStorage != IntPtr.Zero) { FreeLibrary(_hDStorage); _hDStorage = IntPtr.Zero; }
             _fence.Dispose();
             _device.Dispose();
         }
