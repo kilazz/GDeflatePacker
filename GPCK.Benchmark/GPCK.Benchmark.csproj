@@ -10,23 +10,32 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
-		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj" />
-		<PackageReference Include="Spectre.Console" Version="0.54.0" />
-		<PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6" />
+		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj"/>
+		<PackageReference Include="Spectre.Console" Version="0.54.0"/>
+		<PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6"/>
 		<PackageReference Include="Microsoft.Direct3D.DirectStorage" Version="1.3.0">
 			<GeneratePathProperty>true</GeneratePathProperty>
 		</PackageReference>
 		<PackageReference Include="Microsoft.Direct3D.D3D12" Version="1.618.5">
 			<GeneratePathProperty>true</GeneratePathProperty>
 		</PackageReference>
+		<PackageReference Include="Microsoft.Direct3D.DXC" Version="1.8.2505.32">
+			<GeneratePathProperty>true</GeneratePathProperty>
+		</PackageReference>
 	</ItemGroup>
 	<!-- Ensure DirectStorage and D3D12 binaries are copied to the output directory -->
 	<Target Name="CopyNativeBinaries" AfterTargets="Build">
 		<ItemGroup>
-			<DsBinaries Include="$(PkgMicrosoft_Direct3D_DirectStorage)\native\bin\x64\*.dll" />
-			<D3dBinaries Include="$(PkgMicrosoft_Direct3D_D3D12)\build\native\bin\x64\*.dll" />
+			<DsBinaries Include="$(PkgMicrosoft_Direct3D_DirectStorage)\native\bin\x64\*.dll"/>
+			<!-- Copy Agility SDK to root to attempt local override -->
+			<D3dBinaries Include="$(PkgMicrosoft_Direct3D_D3D12)\build\native\bin\x64\*.dll"/>
+			<DxcBinaries Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\*.dll"/>
+			<!-- Fallback compiler often needed by DStorage Core -->
+			<SysCompiler Include="C:\Windows\System32\d3dcompiler_47.dll" Condition="Exists('C:\Windows\System32\d3dcompiler_47.dll')"/>
 		</ItemGroup>
-		<Copy SourceFiles="@(DsBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
-		<Copy SourceFiles="@(D3dBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+		<Copy SourceFiles="@(DsBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
+		<Copy SourceFiles="@(D3dBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
+		<Copy SourceFiles="@(DxcBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
+		<Copy SourceFiles="@(SysCompiler)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
 	</Target>
 </Project>

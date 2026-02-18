@@ -211,44 +211,63 @@ namespace GPCK.Benchmark
         public bool IsHardwareAccelerated { get; private set; } = false;
         public string InitError { get; private set; } = "";
 
+        private static string _staticInitError = "";
+
         // Static initializer to configure DirectStorage exactly once before any factory is created
         static GpuDirectStorage()
         {
             try
             {
-                // Preload compiler to avoid DSTORAGE_ERROR_CORE_INIT_FAILED (0x89240003)
-                // when falling back to software compute shader for decompression.
+                // Preload compiler dependencies.
+                // dstoragecore.dll relies on d3dcompiler_47.dll or dxil.dll/dxcompiler.dll.
+
+                string currentDir = AppContext.BaseDirectory;
+
+                // Load D3D12Core.dll if present to prefer Agility SDK
+                string d3d12CorePath = Path.Combine(currentDir, "D3D12Core.dll");
+                if (File.Exists(d3d12CorePath)) LoadLibraryW(d3d12CorePath);
+
+                // Load compilers
                 LoadLibraryW("d3dcompiler_47.dll");
                 LoadLibraryW("dxil.dll");
+                LoadLibraryW("dxcompiler.dll");
 
-                // "Safe Mode" Configuration for DirectStorage
+                // Configuration for DirectStorage
                 DSTORAGE_CONFIGURATION1 config = new DSTORAGE_CONFIGURATION1();
 
-                config.NumSubmitThreads = 1;
-                config.NumBuiltInCpuDecompressionThreads = 0; // Auto
+                config.NumSubmitThreads = 0; // Use default
+                config.NumBuiltInCpuDecompressionThreads = 0; // Use default
 
-                config.ForceLegacyMapping = 1; // BypassIO can fail on some systems
-                config.DisableBypassIO = 1;
-
+                config.ForceLegacyMapping = 0;
+                config.DisableBypassIO = 0;
                 config.DisableTelemetry = 1;
 
-                // 0 = Enable Driver Optimization (Metacommand). 1 = Force Compute Shader.
-                // We try 0 first to use HW acceleration on RX 6600.
-                // If it fails with 0x89240003, it means fallback failed too (due to missing DLLs above).
+                // Allow hardware to try first. If we force software (1) and it fails, it means compiler missing.
+                // If we allow hardware (0), and it fails, it falls back to software.
                 config.DisableGpuDecompressionMetacommand = 0;
-
                 config.DisableGpuDecompressionSystemMemoryFallback = 0;
 
-                DStorageSetConfiguration1(&config);
+                int hr = DStorageSetConfiguration1(&config);
+                if (FAILED(hr))
+                {
+                    _staticInitError += $" DStorageSetConfiguration1 failed: 0x{hr:X}";
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // If dll is missing, it will be caught in constructor
+                _staticInitError = $"Exception during static init: {ex.Message}";
             }
         }
 
         public GpuDirectStorage()
         {
+            if (!string.IsNullOrEmpty(_staticInitError))
+            {
+                InitError = _staticInitError;
+                IsSupported = false;
+                return;
+            }
+
             try
             {
                 // 1. Get Factory
@@ -266,12 +285,13 @@ namespace GPCK.Benchmark
                 }
 
                 // 2. Debug Flags & Staging
-                _factory->SetDebugFlags(0);
+                // Enable debug break on error
+                // _factory->SetDebugFlags(0x1); // DSTORAGE_DEBUG_SHOW_ERRORS
 
                 // Use 32MB Staging Buffer.
                 _factory->SetStagingBufferSize(DStorageConstants.DSTORAGE_STAGING_BUFFER_SIZE_32MB);
 
-                // 3. Create D3D12 Device (Explicitly Select High Performance Adapter)
+                // 3. Create D3D12 Device
                 IDXGIFactory1* pDXGIFactory = null;
                 Guid uuidDxgi = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
 
@@ -318,7 +338,7 @@ namespace GPCK.Benchmark
 
                 if (FAILED(hrDevice))
                 {
-                    InitError = $"Failed to create D3D12 Device (0x{hrDevice:X})";
+                    InitError = $"Failed to create D3D12 Device (0x{hrDevice:X}). Verify D3D12 support.";
                     return;
                 }
 
@@ -336,21 +356,22 @@ namespace GPCK.Benchmark
                 Guid uuidQueue = new Guid("cfdbd83f-9e06-4fda-83ef-647f42b59529");
                 int hrQueue = -1;
 
-                // Try creating with max capacity
                 if (TryCreateQueue(DStorageConstants.DSTORAGE_MAX_QUEUE_CAPACITY, (IntPtr)_device.Get(), uuidQueue, out hrQueue))
                 {
                     IsHardwareAccelerated = true;
                 }
                 else
                 {
-                    // Fallback: Try smaller queue capacity
+                    // Fallback
                     if (TryCreateQueue(DStorageConstants.DSTORAGE_MIN_QUEUE_CAPACITY, (IntPtr)_device.Get(), uuidQueue, out hrQueue))
                     {
                         IsHardwareAccelerated = true;
                     }
                     else
                     {
-                        InitError = $"Failed to create Hardware DStorage Queue (HR: 0x{hrQueue:X}).\nEnsure 'd3dcompiler_47.dll' is present for shader compilation.";
+                        // 0x89240003 = DSTORAGE_ERROR_CORE_INIT_FAILED
+                        // This typically means the decompression shader couldn't be compiled/loaded.
+                        InitError = $"Failed to create Hardware DStorage Queue (HR: 0x{hrQueue:X}).\nUsually caused by missing 'd3dcompiler_47.dll' or 'dxcompiler.dll'.";
                         return;
                     }
                 }
