@@ -6,13 +6,12 @@
 		<Nullable>enable</Nullable>
 		<PlatformTarget>x64</PlatformTarget>
 		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
-		<!-- Required for interacting with native compression pointers -->
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
-		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj"/>
-		<PackageReference Include="Spectre.Console" Version="0.54.0"/>
-		<PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6"/>
+		<ProjectReference Include="..\GPCK.Core\GPCK.Core.csproj" />
+		<PackageReference Include="Spectre.Console" Version="0.54.0" />
+		<PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6" />
 		<PackageReference Include="Microsoft.Direct3D.DirectStorage" Version="1.3.0">
 			<GeneratePathProperty>true</GeneratePathProperty>
 		</PackageReference>
@@ -23,19 +22,21 @@
 			<GeneratePathProperty>true</GeneratePathProperty>
 		</PackageReference>
 	</ItemGroup>
-	<!-- Ensure DirectStorage and D3D12 binaries are copied to the output directory -->
 	<Target Name="CopyNativeBinaries" AfterTargets="Build">
 		<ItemGroup>
-			<DsBinaries Include="$(PkgMicrosoft_Direct3D_DirectStorage)\native\bin\x64\*.dll"/>
-			<!-- Copy Agility SDK to root to attempt local override -->
-			<D3dBinaries Include="$(PkgMicrosoft_Direct3D_D3D12)\build\native\bin\x64\*.dll"/>
-			<DxcBinaries Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\*.dll"/>
-			<!-- Fallback compiler often needed by DStorage Core -->
-			<SysCompiler Include="C:\Windows\System32\d3dcompiler_47.dll" Condition="Exists('C:\Windows\System32\d3dcompiler_47.dll')"/>
+			<!-- DirectStorage layout: native/bin/x64/ -->
+			<DsBinaries Include="$(PkgMicrosoft_Direct3D_DirectStorage)\native\bin\x64\*.dll" />
+			<!-- Agility SDK layout: build/native/bin/x64/ (Note the build/native prefix) -->
+			<D3dBinaries Include="$(PkgMicrosoft_Direct3D_D3D12)\build\native\bin\x64\D3D12Core.dll" />
+			<D3dBinaries Include="$(PkgMicrosoft_Direct3D_D3D12)\build\native\bin\x64\d3d12SDKLayers.dll" />
+			<!-- DXC Compiler layout: build/native/bin/x64/ -->
+			<DxcBinaries Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\dxcompiler.dll" />
+			<DxcBinaries Include="$(PkgMicrosoft_Direct3D_DXC)\build\native\bin\x64\dxil.dll" />
 		</ItemGroup>
-		<Copy SourceFiles="@(DsBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
-		<Copy SourceFiles="@(D3dBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
-		<Copy SourceFiles="@(DxcBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
-		<Copy SourceFiles="@(SysCompiler)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"/>
+		<!-- Copy DirectStorage and Compiler binaries to root -->
+		<Copy SourceFiles="@(DsBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+		<Copy SourceFiles="@(DxcBinaries)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+		<!-- Copy Agility SDK to D3D12 subfolder as required by the bootstrapper logic -->
+		<Copy SourceFiles="@(D3dBinaries)" DestinationFolder="$(OutDir)\D3D12" SkipUnchangedFiles="true" />
 	</Target>
 </Project>
