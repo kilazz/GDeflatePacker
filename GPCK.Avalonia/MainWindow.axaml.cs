@@ -24,6 +24,7 @@ public class FileItem
     public string RelativePath { get; set; } = string.Empty;
     public Guid AssetId { get; set; }
     public string Size { get; set; } = string.Empty;
+    public long SizeBytes { get; set; }
     public string FilePath { get; set; } = string.Empty;
     public bool IsArchiveEntry { get; set; } = false;
     public GameArchive? SourceArchive { get; set; }
@@ -71,6 +72,10 @@ public partial class MainWindow : Window
     private List<GameArchive> _openArchives = new();
     private VulkanDecompressor? _gpu;
 
+    // Benchmark-derived constants for simulator
+    private const double SpeedCpuMbps = 910.2;
+    private const double SpeedGpuMbps = 5772.0;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -80,6 +85,12 @@ public partial class MainWindow : Window
         VisualizerItems.ItemsSource = _blocks;
 
         CheckBackend();
+
+        // Subscribe to slider changes to update stats in real-time
+        SliderSimLevel.PropertyChanged += (s, e) => {
+             if (e.Property.Name == "Value" && FileList.SelectedItem is FileItem item)
+                 UpdateSimStats(item);
+        };
     }
 
     private void CheckBackend()
@@ -87,7 +98,6 @@ public partial class MainWindow : Window
         bool cpuAvailable = _processor.IsCpuLibraryAvailable();
         string status = $"CPU: {(cpuAvailable ? "Native" : ".NET")}";
 
-        // Try initialize Vulkan (Path B)
         try
         {
             _gpu = new VulkanDecompressor();
@@ -107,8 +117,6 @@ public partial class MainWindow : Window
         foreach (var a in _openArchives) a.Dispose();
         base.OnClosed(e);
     }
-
-    // --- Event Handlers ---
 
     private async void BtnOpenArchive_Click(object sender, RoutedEventArgs e)
     {
@@ -146,13 +154,13 @@ public partial class MainWindow : Window
                         AssetId = entry.AssetId,
                         RelativePath = entry.Path,
                         Size = FormatSize(entry.OriginalSize),
+                        SizeBytes = entry.OriginalSize,
                         FilePath = path,
                         CompressedSizeBytes = entry.CompressedSize,
                         ManifestInfo = entry.MetadataInfo
                     };
                     _files.Add(item);
 
-                    // Visualizer
                     double w = Math.Max(2.0, entry.CompressedSize * scale);
                     if (w > 100) w = 100;
 
@@ -195,7 +203,6 @@ public partial class MainWindow : Window
             await Task.Run(() => {
                 var map = AssetPacker.BuildFileMap(path);
                 Dispatcher.UIThread.Post(() => {
-                    // Pass key (full path) and value (relative path)
                     foreach (var kv in map) AddFileItem(kv.Key, kv.Value);
                     RefreshFilter();
                     UpdateStatus("Folder added.");
@@ -207,12 +214,14 @@ public partial class MainWindow : Window
     private void AddFileItem(string path, string? relativePath = null)
     {
         string rel = relativePath ?? Path.GetFileName(path);
+        long sz = File.Exists(path) ? new FileInfo(path).Length : 0;
         _files.Add(new FileItem
         {
             FilePath = path,
             RelativePath = rel,
             AssetId = AssetIdGenerator.Generate(rel),
-            Size = "Pending"
+            Size = FormatSize(sz),
+            SizeBytes = sz
         });
     }
 
@@ -230,12 +239,16 @@ public partial class MainWindow : Window
     {
         if (sender is not Button btn) return;
         bool isExplorer = btn == TabExplorer;
+        bool isVisualizer = btn == TabVisualizer;
+        bool isSim = btn == TabSim;
 
         ExplorerView.IsVisible = isExplorer;
-        VisualizerView.IsVisible = !isExplorer;
+        VisualizerView.IsVisible = isVisualizer;
+        SimView.IsVisible = isSim;
 
         TabExplorer.Classes.Set("Selected", isExplorer);
-        TabVisualizer.Classes.Set("Selected", !isExplorer);
+        TabVisualizer.Classes.Set("Selected", isVisualizer);
+        TabSim.Classes.Set("Selected", isSim);
     }
 
     private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e) => RefreshFilter();
@@ -253,6 +266,7 @@ public partial class MainWindow : Window
     {
         if (FileList.SelectedItem is not FileItem item) return;
         ResetPreview();
+        UpdateSimStats(item);
 
         try
         {
@@ -286,6 +300,55 @@ public partial class MainWindow : Window
         catch { /* Ignore preview errors */ }
     }
 
+    private void UpdateSimStats(FileItem item)
+    {
+        double sizeMb = item.SizeBytes / 1024.0 / 1024.0;
+
+        // Simulation logic: Higher compression level adds a CPU penalty (exponential complexity)
+        double currentLevel = SliderSimLevel.Value;
+        double cpuPenalty = 1.0 + (Math.Pow(currentLevel / 6.0, 2.0) - 1.0) * 0.5;
+
+        double cpuTime = (sizeMb / SpeedCpuMbps) * cpuPenalty;
+        double gpuTime = sizeMb / SpeedGpuMbps; // GPU is mostly invariant to level due to HW decompressors
+        double gain = cpuTime / gpuTime;
+
+        TxtSimAssetName.Text = item.RelativePath;
+        TxtSimAssetSize.Text = item.Size;
+        TxtCpuTime.Text = $"{cpuTime:F3}s";
+        TxtGpuTime.Text = $"{gpuTime:F3}s";
+        TxtEfficiencyGain.Text = $"{gain:F1}x Faster";
+
+        BarCpu.Value = 0;
+        BarGpu.Value = 0;
+    }
+
+    private async void BtnRunSim_Click(object sender, RoutedEventArgs e)
+    {
+        if (FileList.SelectedItem is not FileItem item) return;
+
+        double sizeMb = item.SizeBytes / 1024.0 / 1024.0;
+        double currentLevel = SliderSimLevel.Value;
+        double cpuPenalty = 1.0 + (Math.Pow(currentLevel / 6.0, 2.0) - 1.0) * 0.5;
+
+        double cpuTime = (sizeMb / SpeedCpuMbps) * cpuPenalty;
+
+        BarCpu.Value = 0;
+        BarGpu.Value = 0;
+
+        // Animate GPU (instantly basically)
+        await Task.Delay(10);
+        BarGpu.Value = 100;
+
+        // Animate CPU based on "Complexity"
+        int steps = 20;
+        int msPerStep = (int)(cpuTime * 1000 / steps);
+        for (int i = 1; i <= steps; i++)
+        {
+            await Task.Delay(Math.Max(10, msPerStep));
+            BarCpu.Value = (i * 100) / steps;
+        }
+    }
+
     private Stream? GetStream(FileItem item)
     {
         if (item.IsArchiveEntry && item.SourceArchive != null && item.EntryInfo.HasValue)
@@ -302,6 +365,45 @@ public partial class MainWindow : Window
         LblNoPreview.IsVisible = true;
     }
 
+    private void CmbMethod_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (NumLevel == null || SliderSimLevel == null) return;
+
+        string method = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
+
+        // Define limits per algorithm
+        double maxLevel = 12;
+        bool isEnabled = true;
+
+        switch (method)
+        {
+            case "Zstd":
+                maxLevel = 22;
+                break;
+            case "LZ4":
+                maxLevel = 12;
+                break;
+            case "GDeflate":
+                maxLevel = 12;
+                break;
+            case "Store":
+                maxLevel = 1;
+                isEnabled = false;
+                break;
+            default: // Auto
+                maxLevel = 12;
+                break;
+        }
+
+        NumLevel.IsEnabled = isEnabled;
+        NumLevel.Maximum = (decimal)maxLevel;
+        if (NumLevel.Value > (decimal)maxLevel) NumLevel.Value = (decimal)maxLevel;
+
+        // Sync Simulator limits too
+        SliderSimLevel.Maximum = maxLevel;
+        if (SliderSimLevel.Value > maxLevel) SliderSimLevel.Value = maxLevel;
+    }
+
     private async void BtnCompress_Click(object sender, RoutedEventArgs e)
     {
         var saveFile = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { DefaultExtension = "gpck", Title = "Save Package" });
@@ -312,8 +414,11 @@ public partial class MainWindow : Window
         string methodStr = (CmbMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Auto";
         Enum.TryParse(methodStr, out AssetPacker.CompressionMethod method);
 
+        // Use user selected level
+        int level = (int)(NumLevel.Value ?? 9);
+
         await RunOp(async (ct, prog) => {
-            await _processor.CompressFilesToArchiveAsync(map, saveFile.Path.LocalPath, true, 9, null, false, prog, ct, method);
+            await _processor.CompressFilesToArchiveAsync(map, saveFile.Path.LocalPath, true, level, null, false, prog, ct, method);
         });
         UpdateStatus("Packed successfully.");
     }
