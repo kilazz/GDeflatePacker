@@ -2,7 +2,7 @@
 
 **High-performance asset management for .NET 10 & DirectStorage.**
 
-GPCK is a next-gen archive format and toolset designed for AAA game engines. It leverages **DirectStorage** and **GDeflate** to eliminate loading bottlenecks and maximize NVMe throughput.
+GPCK is a archive format game engines. It leverages **DirectStorage** and **GDeflate** to eliminate loading bottlenecks and maximize NVMe throughput.
 
 ---
 
