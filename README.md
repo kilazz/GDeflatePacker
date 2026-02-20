@@ -1,4 +1,4 @@
-# GPCK (Game Package Construction Kit)
+# GPCK (Game Package)
 
 **High-performance asset management for .NET 10 & DirectStorage.**
 
