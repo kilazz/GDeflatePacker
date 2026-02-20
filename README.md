@@ -1,39 +1,55 @@
 # GPCK (Game Package Construction Kit)
 
-**Next-Gen Asset Management System for .NET 10**
+**High-performance asset management for .NET 10 & DirectStorage.**
 
-High-performance archive format leveraging **DirectStorage**, **GDeflate** (GPU decompression), and NVMe optimizations.
+GPCK is a next-gen archive format and toolset designed for AAA game engines. It leverages **DirectStorage** and **GDeflate** to eliminate loading bottlenecks and maximize NVMe throughput.
 
-## 🚀 Features
-*   **Compression:** GDeflate (GPU optimized), Zstd (High Ratio), LZ4 (Low Latency).
-*   **Architecture:** DirectStorage alignment (4KB/64KB), xxHash64 indexing, and AES-GCM encryption.
-*   **Optimized:** Data locality for sequential reads and automatic texture streaming (mip-splitting).
-*   **Smart Packing:** Content-addressable deduplication.
+---
 
-## 🛠️ Components
-*   **GPCK.Core:** Core library with Virtual File System (VFS) and multithreaded I/O.
-*   **GPCK.Avalonia:** Cross-platform GUI for packing, inspecting, and visualizing archives.
-*   **GPCK.CLI:** Headless tool for build pipelines.
-*   **GPCK.Benchmark:** Decompression throughput testing harness.
+## 🚀 Key Features
 
-## 📦 Usage
+*   **Hybrid Compression:** **Zstd** for logic/data, **GDeflate** for textures (GPU Path B), and **LZ4** for real-time streaming.
+*   **Virtual File System (VFS):** Layer-based mounting with $O(\log N)$ lookup; native support for mods and delta patches.
+*   **Hardware Ready:** 4KB/64KB block alignment for DirectStorage and Vulkan Compute pipelines.
+*   **Smart Dedup:** Integrated **xxHash64** fingerprinting removes redundant assets.
+*   **Data Locality:** Physical sorting by path ensures sequential read patterns.
 
-### CLI
+---
+
+## 🛠 Components
+
+| Name | Role |
+| :--- | :--- |
+| **GPCK.Core** | Core logic, VFS, and native library interop. |
+| **GPCK.Avalonia** | GUI with **Archive Fragmentation Map** visualizer. |
+| **GPCK.CLI** | Headless tool for CI/CD build pipelines. |
+
+---
+
+## 📦 Quick Start
+
 ```bash
-# Pack
-GPCK.CLI.exe compress "C:\Assets" "Data.gpck" --method Auto --level 9
+# Pack folder into an optimized archive
+gpck pack "C:\Source\Assets" "Data.gpck" --method Auto --level 9
 
-# Unpack
-GPCK.CLI.exe decompress "Data.gpck" "Output"
+# Unpack archive
+gpck unpack "Data.gpck" "C:\Output"
+
+# Technical inspection
+gpck info "Data.gpck"
 ```
 
-### GUI
-Run `GPCK.Avalonia.exe` to browse archives, view fragmentation maps, or pack folders via the UI.
+---
 
-## 🔧 Build
-Requires **.NET 10 SDK**.
+## 🔧 Building
+
+*   **SDK:** .NET 10.0
+*   **Platform:** x64 (Required for GDeflate/DirectStorage)
+*   **Deps:** Included in `runtimes/` (`dstorage.dll`, `libzstd.dll`, etc.)
 
 ```bash
 dotnet build -c Release
 ```
-*Ensure native libraries (`dstorage.dll`, `GDeflate.dll`, `libzstd.dll`) are present in the output.*
+
+## 📜 License
+MIT License. NVIDIA GDeflate components subject to Apache-2.0.
