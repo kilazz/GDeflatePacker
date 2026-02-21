@@ -50,6 +50,3 @@ gpck info "Data.gpck"
 ```bash
 dotnet build -c Release
 ```
-
-## 📜 License
-MIT License. NVIDIA GDeflate components subject to Apache-2.0.
