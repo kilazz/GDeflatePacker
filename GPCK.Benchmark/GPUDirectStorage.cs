@@ -273,14 +273,14 @@ namespace GPCK.Benchmark
                     req.SetOptions(DStorageConstants.DSTORAGE_REQUEST_SOURCE_MEMORY, DStorageConstants.DSTORAGE_REQUEST_DESTINATION_BUFFER, DStorageConstants.DSTORAGE_COMPRESSION_FORMAT_GDEFLATE);
 
                     req.Source.Memory = new DSTORAGE_SOURCE_MEMORY { Source = pData + chunkOffsets[i] + 4, Size = (uint)chunkSizes[i] };
-                    req.Destination.Buffer = new DSTORAGE_DESTINATION_BUFFER { Resource = dstBuffer.Get(), Offset = outOffset, Size = 65536 };
-                    req.UncompressedSize = 65536;
+                    req.Destination.Buffer = new DSTORAGE_DESTINATION_BUFFER { Resource = dstBuffer.Get(), Offset = outOffset, Size = 131072 };
+                    req.UncompressedSize = 131072;
 
-                    if (outOffset + 65536 > (ulong)totalOriginalSize)
+                    if (outOffset + 131072 > (ulong)totalOriginalSize)
                         req.UncompressedSize = req.Destination.Buffer.Size = (uint)((ulong)totalOriginalSize - outOffset);
 
                     _queue->EnqueueRequest(&req);
-                    outOffset += 65536;
+                    outOffset += 131072;
                 }
 
                 _fenceValue++;

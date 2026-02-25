@@ -14,7 +14,7 @@ namespace GPCK.Benchmark
     class Program
     {
         private const int AlgorithmPayloadSize = 128 * 1024 * 1024; // 128MB
-        private const string TempArchiveName = "format_vfs_stress.gpck";
+        private const string TempArchiveName = "format_vfs_stress.gtoc";
 
         [STAThread]
         static void Main(string[] args)
@@ -51,6 +51,8 @@ namespace GPCK.Benchmark
             finally
             {
                 if (File.Exists(TempArchiveName)) File.Delete(TempArchiveName);
+                string gdatName = Path.ChangeExtension(TempArchiveName, ".gdat");
+                if (File.Exists(gdatName)) File.Delete(gdatName);
             }
         }
 
@@ -114,7 +116,7 @@ namespace GPCK.Benchmark
             sw.Restart();
             packer.CompressFilesToArchiveAsync(fileMap, TempArchiveName, false, 6, null, false, null, CancellationToken.None).AsTask().Wait();
             var packTime = sw.ElapsedMilliseconds;
-            var archiveSize = new FileInfo(TempArchiveName).Length;
+            var archiveSize = new FileInfo(Path.ChangeExtension(TempArchiveName, ".gdat")).Length;
 
             using var archive = new GameArchive(TempArchiveName);
             var keys = fileMap.Values.ToList();
@@ -148,13 +150,19 @@ namespace GPCK.Benchmark
             // 4. Alignment & Integrity
             long slackSpace = 0;
             int misalignedCount = 0;
+            var entriesByOffset = new List<GameArchive.FileEntry>();
             for (int i = 0; i < archive.FileCount; i++) {
-                var entry = archive.GetEntryByIndex(i);
+                entriesByOffset.Add(archive.GetEntryByIndex(i));
+            }
+            entriesByOffset.Sort((a, b) => a.DataOffset.CompareTo(b.DataOffset));
+
+            for (int i = 0; i < entriesByOffset.Count; i++) {
+                var entry = entriesByOffset[i];
                 if ((entry.Flags & GameArchive.MASK_METHOD) == GameArchive.METHOD_GDEFLATE && (entry.DataOffset % 4096 != 0)) misalignedCount++;
                 if (i > 0) {
-                    var prev = archive.GetEntryByIndex(i - 1);
+                    var prev = entriesByOffset[i - 1];
                     long gap = entry.DataOffset - (prev.DataOffset + prev.CompressedSize);
-                    if (gap > 0 && gap < 65536) slackSpace += gap;
+                    if (gap > 0 && gap < 131072) slackSpace += gap;
                 }
             }
 
@@ -243,11 +251,11 @@ namespace GPCK.Benchmark
         static byte[] CompressGDeflate(byte[] input, int level) => CompressGDeflate(input, level, true);
         static byte[] CompressGDeflate(byte[] input, int level, bool bypass) {
             using var ms = new MemoryStream(); using var bw = new BinaryWriter(ms);
-            int numChunks = (input.Length + 65535) / 65536; bw.Write(numChunks);
-            byte[] scratch = new byte[CodecGDeflate.CompressBound(65535)];
+            int numChunks = (input.Length + 131071) / 131072; bw.Write(numChunks);
+            byte[] scratch = new byte[CodecGDeflate.CompressBound(131072)];
             unsafe { fixed (byte* pI = input, pS = scratch) {
                 for(int i=0; i<numChunks; i++) {
-                    int off = i * 65536; int sz = Math.Min(65536, input.Length - off); ulong outS = (ulong)scratch.Length;
+                    int off = i * 131072; int sz = Math.Min(131072, input.Length - off); ulong outS = (ulong)scratch.Length;
                     if (CodecGDeflate.Compress(pS, ref outS, pI + off, (ulong)sz, (uint)level, 0) && (!bypass || outS < (ulong)sz)) { bw.Write((int)outS); bw.Write(new ReadOnlySpan<byte>(scratch, 0, (int)outS)); }
                     else { bw.Write(-1); bw.Write(sz); bw.Write(new ReadOnlySpan<byte>(input, off, sz)); }
                 }
@@ -259,9 +267,9 @@ namespace GPCK.Benchmark
             int chunks = br.ReadInt32(); int[] sizes = new int[chunks]; long[] offsets = new long[chunks]; long curr = ms.Position;
             for(int i=0; i<chunks; i++) { offsets[i] = curr; int s = br.ReadInt32(); if (s == -1) { int rs = br.ReadInt32(); br.BaseStream.Seek(rs, SeekOrigin.Current); curr += 8 + rs; } else { br.BaseStream.Seek(s, SeekOrigin.Current); curr += 4 + s; } sizes[i] = s; }
             Parallel.For(0, chunks, i => { unsafe { fixed (byte* pIn = input, pOut = output) {
-                int target = Math.Min(65536, outS - (i * 65536));
-                if (sizes[i] == -1) Buffer.MemoryCopy(pIn + offsets[i] + 8, pOut + (i * 65536), target, target);
-                else CodecGDeflate.Decompress(pOut + (i * 65536), (ulong)target, pIn + offsets[i] + 4, (ulong)sizes[i], 1);
+                int target = Math.Min(131072, outS - (i * 131072));
+                if (sizes[i] == -1) Buffer.MemoryCopy(pIn + offsets[i] + 8, pOut + (i * 131072), target, target);
+                else CodecGDeflate.Decompress(pOut + (i * 131072), (ulong)target, pIn + offsets[i] + 4, (ulong)sizes[i], 1);
             }}});
             return output;
         }

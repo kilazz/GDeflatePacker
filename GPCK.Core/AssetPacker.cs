@@ -13,7 +13,7 @@ namespace GPCK.Core
 {
     public class AssetPacker
     {
-        private const int ChunkSize = 65536;
+        private const int ChunkSize = 131072; // 128KB
         private const int DefaultAlignment = 16;
         private const int GpuAlignment = 4096;
 
@@ -30,6 +30,8 @@ namespace GPCK.Core
             public int Alignment;
             public uint Meta1;
             public uint Meta2;
+            public byte[]? ChunkTableData;
+            public int ChunkCount;
         }
 
         public static Dictionary<string, string> BuildFileMap(string sourceDirectory)
@@ -70,7 +72,7 @@ namespace GPCK.Core
                 }
             }
 
-            byte[] compressed = await CompressToChunksAsync(raw, level, key, method);
+            var (compressed, table, chunkCount) = await CompressToChunksAsync(raw, level, key, method);
 
             uint flags = GameArchive.FLAG_STREAMING | (method != CompressionMethod.Store ? GameArchive.FLAG_IS_COMPRESSED : 0);
 
@@ -89,16 +91,26 @@ namespace GPCK.Core
             int alignPower = (int)Math.Log2(align);
             flags |= (uint)(alignPower << GameArchive.SHIFT_ALIGNMENT);
 
-            outBag.Add(new ProcessedFile { AssetId = AssetIdGenerator.Generate(rel), OriginalPath = rel, OriginalSize = (uint)raw.Length, CompressedSize = (uint)compressed.Length, CompressedData = compressed, Flags = flags, Alignment = align, Meta1 = m1, Meta2 = m2 });
+            outBag.Add(new ProcessedFile {
+                AssetId = AssetIdGenerator.Generate(rel),
+                OriginalPath = rel,
+                OriginalSize = (uint)raw.Length,
+                CompressedSize = (uint)compressed.Length,
+                CompressedData = compressed,
+                Flags = flags,
+                Alignment = align,
+                Meta1 = m1,
+                Meta2 = m2,
+                ChunkTableData = table,
+                ChunkCount = chunkCount
+            });
         }
 
-        private async Task<byte[]> CompressToChunksAsync(byte[] input, int level, byte[]? key, CompressionMethod method)
+        private async Task<(byte[] Data, byte[] Table, int ChunkCount)> CompressToChunksAsync(byte[] input, int level, byte[]? key, CompressionMethod method)
         {
             using var ms = new MemoryStream();
             using var bw = new BinaryWriter(ms);
-            int blocks = (input.Length + ChunkSize - 1) / ChunkSize;
-            bw.Write(blocks);
-            ms.Seek(blocks * 8, SeekOrigin.Current);
+            int blocks = input.Length == 0 ? 1 : (input.Length + ChunkSize - 1) / ChunkSize;
 
             var entries = new List<GameArchive.ChunkHeaderEntry>();
             for (int i = 0; i < blocks; i++) {
@@ -122,23 +134,40 @@ namespace GPCK.Core
             }
             if (key != null) table = Encrypt(table, key);
 
-            ms.Position = 4; bw.Write(table);
-            return ms.ToArray();
+            return (ms.ToArray(), table, blocks);
         }
 
         private byte[] CompressGDeflate(byte[] input, int level) {
+            if (input.Length == 0) return Array.Empty<byte>();
             ulong bound = CodecGDeflate.CompressBound((ulong)input.Length);
             byte[] output = new byte[bound];
-            unsafe { fixed(byte* pI = input, pO = output) { ulong outS = bound; CodecGDeflate.Compress(pO, ref outS, pI, (ulong)input.Length, (uint)level, 0); Array.Resize(ref output, (int)outS); return output; } }
+            unsafe {
+                fixed(byte* pI = input, pO = output) {
+                    ulong outS = bound;
+                    bool success = CodecGDeflate.Compress(pO, ref outS, pI, (ulong)input.Length, (uint)level, 0);
+                    if (!success || outS >= (ulong)input.Length) return input;
+                    Array.Resize(ref output, (int)outS);
+                    return output;
+                }
+            }
         }
 
         private byte[] CompressZstd(byte[] input, int level) {
+            if (input.Length == 0) return Array.Empty<byte>();
             ulong bound = CodecZstd.ZSTD_compressBound((ulong)input.Length);
             byte[] output = new byte[bound];
-            unsafe { fixed(byte* pI = input, pO = output) { ulong outS = CodecZstd.ZSTD_compress((IntPtr)pO, bound, (IntPtr)pI, (ulong)input.Length, level); Array.Resize(ref output, (int)outS); return output; } }
+            unsafe {
+                fixed(byte* pI = input, pO = output) {
+                    ulong outS = CodecZstd.ZSTD_compress((IntPtr)pO, bound, (IntPtr)pI, (ulong)input.Length, level);
+                    if (CodecZstd.ZSTD_isError(outS) != 0 || outS >= (ulong)input.Length) return input;
+                    Array.Resize(ref output, (int)outS);
+                    return output;
+                }
+            }
         }
 
         private byte[] CompressLZ4(byte[] input, int level) {
+            if (input.Length == 0) return Array.Empty<byte>();
             int bound = CodecLZ4.LZ4_compressBound(input.Length);
             byte[] output = new byte[bound];
             unsafe {
@@ -146,7 +175,7 @@ namespace GPCK.Core
                     int outS = level > 3
                         ? CodecLZ4.LZ4_compress_HC((IntPtr)pI, (IntPtr)pO, input.Length, bound, level)
                         : CodecLZ4.LZ4_compress_default((IntPtr)pI, (IntPtr)pO, input.Length, bound);
-                    if (outS <= 0) return input;
+                    if (outS <= 0 || outS >= input.Length) return input;
                     Array.Resize(ref output, outS);
                     return output;
                 }
@@ -163,56 +192,67 @@ namespace GPCK.Core
 
         private async Task WriteArchive(List<ProcessedFile> files, string path, bool dedup, byte[]? key, IProgress<int>? progress)
         {
-            using var fs = new FileStream(path, FileMode.Create);
-            using var bw = new BinaryWriter(fs);
+            string gtocPath = Path.ChangeExtension(path, ".gtoc");
+            string gdatPath = Path.ChangeExtension(path, ".gdat");
+
+            using var fsGtoc = new FileStream(gtocPath, FileMode.Create);
+            using var bwGtoc = new BinaryWriter(fsGtoc);
+
+            using var fsGdat = new FileStream(gdatPath, FileMode.Create);
 
             // 1. Calculate table offsets
             long fileTableOffset = 64;
-            long nameTableOffset = fileTableOffset + (files.Count * 44);
-            long dataStartOffset = (nameTableOffset + files.Sum(f => 16 + 2 + Encoding.UTF8.GetByteCount(f.OriginalPath)) + 4095) & ~4095;
+            long nameTableOffset = fileTableOffset + (files.Count * 56);
+            long chunkTableOffset = nameTableOffset + files.Sum(f => 16 + 2 + Encoding.UTF8.GetByteCount(f.OriginalPath));
+            long dataStartOffset = 0;
 
             // 2. Write Header
-            bw.Write(0x4B435047); // "GPCK" in little-endian
-            bw.Write(1); // Version
-            bw.Write(files.Count);
-            bw.Write(0); // Padding
-            bw.Write(fileTableOffset);
-            bw.Write(nameTableOffset);
-            bw.Seek(64, SeekOrigin.Begin);
+            bwGtoc.Write(0x4B435047); // "GPCK" in little-endian
+            bwGtoc.Write(1); // Version
+            bwGtoc.Write(files.Count);
+            bwGtoc.Write(0); // Padding
+            bwGtoc.Write(fileTableOffset);
+            bwGtoc.Write(nameTableOffset);
+            bwGtoc.Seek(64, SeekOrigin.Begin);
 
             // 3. Pre-calculate offsets with deduplication
             // Note: 'files' is sorted by Path for Data Locality.
             var contentMap = new Dictionary<ulong, long>();
             var uniqueDataToWrite = new List<(ProcessedFile File, long Offset)>();
             long currentDataPtr = dataStartOffset;
+            long currentChunkTablePtr = chunkTableOffset;
 
-            var finalEntries = new List<(ProcessedFile File, long Offset)>();
+            var finalEntries = new List<(ProcessedFile File, long DataOffset, long ChunkOffset)>();
 
             foreach (var f in files)
             {
-                long offset;
+                long dOffset;
                 if (dedup)
                 {
                     ulong hash = XxHash64.Compute(f.CompressedData!);
                     if (contentMap.TryGetValue(hash, out long existing))
                     {
-                        offset = existing;
+                        dOffset = existing;
                     }
                     else
                     {
-                        offset = (currentDataPtr + f.Alignment - 1) & ~(f.Alignment - 1);
-                        contentMap[hash] = offset;
-                        uniqueDataToWrite.Add((f, offset));
-                        currentDataPtr = offset + f.CompressedData!.Length;
+                        dOffset = (currentDataPtr + f.Alignment - 1) & ~(f.Alignment - 1);
+                        contentMap[hash] = dOffset;
+                        uniqueDataToWrite.Add((f, dOffset));
+                        currentDataPtr = dOffset + f.CompressedData!.Length;
                     }
                 }
                 else
                 {
-                    offset = (currentDataPtr + f.Alignment - 1) & ~(f.Alignment - 1);
-                    uniqueDataToWrite.Add((f, offset));
-                    currentDataPtr = offset + f.CompressedData!.Length;
+                    dOffset = (currentDataPtr + f.Alignment - 1) & ~(f.Alignment - 1);
+                    uniqueDataToWrite.Add((f, dOffset));
+                    currentDataPtr = dOffset + f.CompressedData!.Length;
                 }
-                finalEntries.Add((f, offset));
+
+                long cOffset = currentChunkTablePtr;
+                currentChunkTablePtr += f.ChunkTableData!.Length;
+
+                finalEntries.Add((f, dOffset, cOffset));
             }
 
             // CRITICAL: The File Table MUST be sorted by AssetId because the reader (GameArchive)
@@ -220,33 +260,41 @@ namespace GPCK.Core
             var tableEntries = finalEntries.OrderBy(x => x.File.AssetId).ToList();
 
             // 4. Write File Table
-            foreach (var (f, offset) in tableEntries)
+            foreach (var (f, dOffset, cOffset) in tableEntries)
             {
-                bw.Write(f.AssetId.ToByteArray());
-                bw.Write(offset);
-                bw.Write(f.CompressedSize);
-                bw.Write(f.OriginalSize);
-                bw.Write(f.Flags);
-                bw.Write(f.Meta1);
-                bw.Write(f.Meta2);
+                bwGtoc.Write(f.AssetId.ToByteArray());
+                bwGtoc.Write(dOffset);
+                bwGtoc.Write(cOffset);
+                bwGtoc.Write(f.CompressedSize);
+                bwGtoc.Write(f.OriginalSize);
+                bwGtoc.Write(f.Flags);
+                bwGtoc.Write(f.Meta1);
+                bwGtoc.Write(f.Meta2);
+                bwGtoc.Write(f.ChunkCount);
             }
 
             // 5. Write Name Table
             // Sorting Name Table by AssetId is cleaner and keeps it consistent with File Table index.
-            foreach (var (f, _) in tableEntries)
+            foreach (var (f, _, _) in tableEntries)
             {
-                bw.Write(f.AssetId.ToByteArray());
+                bwGtoc.Write(f.AssetId.ToByteArray());
                 byte[] n = Encoding.UTF8.GetBytes(f.OriginalPath);
-                bw.Write((ushort)n.Length);
-                bw.Write(n);
+                bwGtoc.Write((ushort)n.Length);
+                bwGtoc.Write(n);
             }
 
-            // 6. Write Data Blocks (in the order optimized for locality)
+            // 6. Write Chunk Tables to .gtoc
+            foreach (var f in files)
+            {
+                bwGtoc.Write(f.ChunkTableData!);
+            }
+
+            // 7. Write Data Blocks (in the order optimized for locality)
             progress?.Report(90);
             foreach (var (f, offset) in uniqueDataToWrite)
             {
-                fs.Seek(offset, SeekOrigin.Begin);
-                await fs.WriteAsync(f.CompressedData!);
+                fsGdat.Seek(offset, SeekOrigin.Begin);
+                await fsGdat.WriteAsync(f.CompressedData!);
             }
             progress?.Report(100);
         }

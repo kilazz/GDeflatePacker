@@ -44,17 +44,14 @@ namespace GPCK.Core
 
         private void InitializeChunkTable()
         {
-            byte[] countBuffer = new byte[4];
-            RandomAccess.Read(_archive.GetFileHandle(), countBuffer, _entry.DataOffset);
-            int count = BitConverter.ToInt32(countBuffer, 0);
-
+            int count = _entry.ChunkCount;
             _chunkTable = new GameArchive.ChunkHeaderEntry[count];
 
             if (_aes != null)
             {
                 int encTableSize = 28 + (count * 8);
                 byte[] encTable = new byte[encTableSize];
-                RandomAccess.Read(_archive.GetFileHandle(), encTable, _entry.DataOffset + 4);
+                _archive.ReadGtoc(encTable, _entry.ChunkTableOffset);
 
                 byte[] decTable = new byte[count * 8];
                 _aes.Decrypt(encTable.AsSpan(0, 12), encTable.AsSpan(28), encTable.AsSpan(12, 16), decTable);
@@ -66,12 +63,11 @@ namespace GPCK.Core
                         OriginalSize = BitConverter.ToUInt32(decTable, i * 8 + 4)
                     };
                 }
-                _dataStartOffset = _entry.DataOffset + 4 + encTableSize;
             }
             else
             {
                 byte[] tableBuffer = new byte[count * 8];
-                RandomAccess.Read(_archive.GetFileHandle(), tableBuffer, _entry.DataOffset + 4);
+                _archive.ReadGtoc(tableBuffer, _entry.ChunkTableOffset);
                 for (int i = 0; i < count; i++)
                 {
                     _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
@@ -79,8 +75,8 @@ namespace GPCK.Core
                         OriginalSize = BitConverter.ToUInt32(tableBuffer, i * 8 + 4)
                     };
                 }
-                _dataStartOffset = _entry.DataOffset + 4 + (count * 8);
             }
+            _dataStartOffset = _entry.DataOffset;
         }
 
         public override bool CanRead => true;
@@ -140,7 +136,12 @@ namespace GPCK.Core
 
             byte[] compBuffer = ArrayPool<byte>.Shared.Rent((int)compSize);
             try {
-                RandomAccess.Read(_archive.GetFileHandle(), compBuffer.AsSpan(0, (int)compSize), offset);
+                int bytesRead = 0;
+                while (bytesRead < compSize) {
+                    int r = RandomAccess.Read(_archive.GetFileHandle(), compBuffer.AsSpan(bytesRead, (int)compSize - bytesRead), offset + bytesRead);
+                    if (r <= 0) throw new EndOfStreamException($"Unexpected end of file. Read {bytesRead}/{compSize} bytes.");
+                    bytesRead += r;
+                }
                 if (_currentChunkData == null || _currentChunkData.Length < origSize) _currentChunkData = new byte[origSize];
                 DecompressInternal(compBuffer.AsSpan(0, (int)compSize), _currentChunkData, origSize);
                 _currentChunkIndex = index;
@@ -149,7 +150,8 @@ namespace GPCK.Core
 
         private unsafe void DecompressInternal(ReadOnlySpan<byte> source, byte[] destination, uint targetSize)
         {
-            if (!_isCompressed) { source.CopyTo(destination); return; }
+            if (targetSize == 0 || source.Length == 0) return;
+            if (!_isCompressed || source.Length == targetSize) { source.CopyTo(destination); return; }
 
             fixed (byte* pSrc = source, pDst = destination)
             {

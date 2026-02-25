@@ -8,17 +8,22 @@ namespace GPCK.Core
 {
     /// <summary>
     /// Virtual File System (VFS).
-    /// Allows mounting multiple .gpck archives as layers.
+    /// Allows mounting multiple .gtoc archives as layers.
     /// Priority: Last mounted archive overrides files from previous ones.
     /// </summary>
     public class VirtualFileSystem : IDisposable
     {
         private readonly List<GameArchive> _mountedArchives = new();
         private readonly Dictionary<Guid, int> _virtualLookup = new();
+        private readonly List<string> _mountedDirectories = new();
 
-        public int MountedCount => _mountedArchives.Count;
+        public int MountedArchiveCount => _mountedArchives.Count;
+        public int MountedDirectoryCount => _mountedDirectories.Count;
 
-        public void Mount(string path)
+        /// <summary>
+        /// Mounts a .gtoc archive.
+        /// </summary>
+        public void MountArchive(string path)
         {
             var archive = new GameArchive(path);
             _mountedArchives.Add(archive);
@@ -31,14 +36,47 @@ namespace GPCK.Core
             }
         }
 
+        /// <summary>
+        /// Mounts a physical directory. Files in this directory will override files in archives.
+        /// Useful for modding and local development.
+        /// </summary>
+        public void MountDirectory(string physicalPath)
+        {
+            if (!Directory.Exists(physicalPath))
+                throw new DirectoryNotFoundException($"Directory not found: {physicalPath}");
+            
+            // Insert at the beginning so directories have the highest priority
+            _mountedDirectories.Insert(0, physicalPath);
+        }
+
         public bool FileExists(string virtualPath)
         {
+            // 1. Check mounted directories first (Loose files override)
+            foreach (var dir in _mountedDirectories)
+            {
+                string physicalPath = Path.Combine(dir, virtualPath);
+                if (File.Exists(physicalPath))
+                    return true;
+            }
+
+            // 2. Check archives
             Guid id = AssetIdGenerator.Generate(virtualPath);
             return _virtualLookup.ContainsKey(id);
         }
 
         public Stream OpenRead(string virtualPath)
         {
+            // 1. Check mounted directories first (Loose files override)
+            foreach (var dir in _mountedDirectories)
+            {
+                string physicalPath = Path.Combine(dir, virtualPath);
+                if (File.Exists(physicalPath))
+                {
+                    return new FileStream(physicalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                }
+            }
+
+            // 2. Check archives
             Guid id = AssetIdGenerator.Generate(virtualPath);
 
             if (TryGetEntryForId(id, out var archive, out var entry))

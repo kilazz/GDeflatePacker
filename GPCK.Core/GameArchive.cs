@@ -16,6 +16,7 @@ namespace GPCK.Core
         private readonly MemoryMappedFile _mmf;
         private readonly MemoryMappedViewAccessor _view;
         private readonly FileStream _dataFileStream;
+        private readonly FileStream _gtocFileStream;
         private readonly ArchiveHeader _header;
 
         public string FilePath { get; }
@@ -32,7 +33,9 @@ namespace GPCK.Core
         public struct FileEntry {
             public Guid AssetId;
             public long DataOffset;
+            public long ChunkTableOffset;
             public uint CompressedSize, OriginalSize, Flags, Meta1, Meta2;
+            public int ChunkCount;
         }
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -50,18 +53,32 @@ namespace GPCK.Core
 
         public GameArchive(string path) {
             FilePath = path;
-            _dataFileStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            _mmf = MemoryMappedFile.CreateFromFile(_dataFileStream, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, false);
+            string gtocPath = Path.ChangeExtension(path, ".gtoc");
+            string gdatPath = Path.ChangeExtension(path, ".gdat");
+
+            if (!File.Exists(gtocPath) && File.Exists(path)) {
+                gtocPath = path;
+                gdatPath = path;
+            }
+
+            _gtocFileStream = new FileStream(gtocPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            _dataFileStream = new FileStream(gdatPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            
+            _mmf = MemoryMappedFile.CreateFromFile(_gtocFileStream, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, false);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
             _view.Read(0, out _header);
         }
 
         public FileEntry GetEntryByIndex(int index) {
-            _view.Read(_header.FileTableOffset + (index * 44), out FileEntry entry);
+            _view.Read(_header.FileTableOffset + (index * 56), out FileEntry entry);
             return entry;
         }
 
         public SafeFileHandle GetFileHandle() => _dataFileStream.SafeFileHandle;
+
+        public void ReadGtoc(byte[] buffer, long offset) {
+            _view.ReadArray(offset, buffer, 0, buffer.Length);
+        }
 
         public bool TryGetEntry(Guid id, out FileEntry entry) {
             int l = 0, r = FileCount - 1;
@@ -101,6 +118,6 @@ namespace GPCK.Core
             return info;
         }
 
-        public void Dispose() { _view.Dispose(); _mmf.Dispose(); _dataFileStream.Dispose(); }
+        public void Dispose() { _view.Dispose(); _mmf.Dispose(); _dataFileStream.Dispose(); _gtocFileStream.Dispose(); }
     }
 }

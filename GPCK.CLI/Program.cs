@@ -20,11 +20,11 @@ namespace GPCK.CLI
                 config.SetApplicationName("GPCK");
                 config.AddCommand<CompressCommand>("compress")
                     .WithAlias("pack")
-                    .WithDescription("Compress a folder into a .gpck archive.");
+                    .WithDescription("Compress a folder into a .gtoc archive.");
 
                 config.AddCommand<DecompressCommand>("decompress")
                     .WithAlias("unpack")
-                    .WithDescription("Decompress a .gpck archive.");
+                    .WithDescription("Decompress a .gtoc archive.");
 
                 config.AddCommand<VerifyCommand>("verify")
                     .WithDescription("Verify the integrity (CRC/Hash) of an archive.");
@@ -49,7 +49,7 @@ namespace GPCK.CLI
             public string Input { get; set; } = "";
 
             [CommandArgument(1, "[OUTPUT]")]
-            [Description("Output .gpck file path.")]
+            [Description("Output .gtoc file path.")]
             public string? Output { get; set; }
 
             [CommandOption("-l|--level")]
@@ -70,7 +70,7 @@ namespace GPCK.CLI
 
         public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
         {
-            string output = settings.Output ?? Path.ChangeExtension(settings.Input, ".gpck");
+            string output = settings.Output ?? Path.ChangeExtension(settings.Input, ".gtoc");
             byte[]? keyBytes = !string.IsNullOrEmpty(settings.Key) ? System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(settings.Key)) : null;
 
             AnsiConsole.MarkupLine($"[bold green]Packing:[/] {settings.Input} -> {output} (Method: {settings.Method})");
@@ -143,7 +143,7 @@ namespace GPCK.CLI
         {
             if (Directory.Exists(settings.Archive))
             {
-                AnsiConsole.MarkupLine("[bold red]ERROR:[/] Input is a directory. Please provide the path to a .gpck file.");
+                AnsiConsole.MarkupLine("[bold red]ERROR:[/] Input is a directory. Please provide the path to a .gtoc file.");
                 return 1;
             }
 
