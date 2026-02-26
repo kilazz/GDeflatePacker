@@ -68,10 +68,10 @@ namespace GPCK.Core
         private async ValueTask ProcessFile(string input, string rel, int level, byte[]? key, bool mipSplit, CompressionMethod force, ConcurrentBag<ProcessedFile> outBag, CancellationToken ct)
         {
             byte[] raw = await File.ReadAllBytesAsync(input, ct);
-            CompressionMethod method = force == CompressionMethod.Auto ? (Path.GetExtension(input).ToLower() == ".dds" ? CompressionMethod.GDeflate : CompressionMethod.Zstd) : force;
+            CompressionMethod method = force == CompressionMethod.Auto ? (input.EndsWith(".dds", StringComparison.OrdinalIgnoreCase) ? CompressionMethod.GDeflate : CompressionMethod.Zstd) : force;
 
             uint m1 = 0, m2 = 0;
-            if (Path.GetExtension(input).ToLower() == ".dds") {
+            if (input.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)) {
                 var h = DdsUtils.GetHeaderInfo(raw);
                 if (h.HasValue) {
                     m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
@@ -103,6 +103,7 @@ namespace GPCK.Core
             };
 
             if (key != null) flags |= GameArchive.FLAG_ENCRYPTED_META;
+            if (m1 != 0) flags |= GameArchive.TYPE_TEXTURE;
 
             int align = method == CompressionMethod.GDeflate ? GpuAlignment : DefaultAlignment;
             int alignPower = (int)Math.Log2(align);
@@ -313,7 +314,7 @@ namespace GPCK.Core
             progress?.Report(100);
         }
 
-        public bool IsCpuLibraryAvailable() => CodecGDeflate.IsAvailable();
+        public static bool IsCpuLibraryAvailable() => CodecGDeflate.IsAvailable();
         public PackageInfo InspectPackage(string path) { using var arch = new GameArchive(path); return arch.GetPackageInfo(); }
         public async Task DecompressArchiveAsync(string path, string outDir, byte[]? key, IProgress<int>? progress) {
             using var arch = new GameArchive(path) { DecryptionKey = key };

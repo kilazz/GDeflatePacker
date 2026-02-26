@@ -85,7 +85,7 @@ public partial class MainWindow : Window
 
     private void CheckBackend()
     {
-        bool cpuAvailable = _processor.IsCpuLibraryAvailable();
+        bool cpuAvailable = AssetPacker.IsCpuLibraryAvailable();
         string status = $"CPU: {(cpuAvailable ? "Native" : ".NET")}";
 
         try
@@ -290,7 +290,10 @@ public partial class MainWindow : Window
     private Stream? GetStream(FileItem item)
     {
         if (item.IsArchiveEntry && item.SourceArchive != null && item.EntryInfo.HasValue)
+        {
+            item.SourceArchive.DecryptionKey = GetKeyBytes();
             return item.SourceArchive.OpenRead(item.EntryInfo.Value);
+        }
         if (File.Exists(item.FilePath))
             return File.OpenRead(item.FilePath);
         return null;
@@ -338,6 +341,32 @@ public partial class MainWindow : Window
         if (NumLevel.Value > (decimal)maxLevel) NumLevel.Value = (decimal)maxLevel;
     }
 
+    private byte[]? GetKeyBytes()
+    {
+        string? key = TxtKey.Text;
+        if (string.IsNullOrEmpty(key)) return null;
+        return System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(key));
+    }
+
+    private async void BtnVerify_Click(object sender, RoutedEventArgs e)
+    {
+        if (_openArchives.Count == 0)
+        {
+            UpdateStatus("No archive loaded to verify.");
+            return;
+        }
+
+        var arch = _openArchives[0]; // Verify the first loaded archive
+        UpdateStatus($"Verifying {Path.GetFileName(arch.FilePath)}...");
+
+        bool result = await Task.Run(() => _processor.VerifyArchive(arch.FilePath, GetKeyBytes()));
+
+        if (result)
+            UpdateStatus("Verification PASSED ✅");
+        else
+            UpdateStatus("Verification FAILED ❌");
+    }
+
     private async void BtnCompress_Click(object sender, RoutedEventArgs e)
     {
         var saveFile = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { DefaultExtension = "gtoc", Title = "Save Package" });
@@ -350,11 +379,19 @@ public partial class MainWindow : Window
 
         // Use user selected level
         int level = (int)(NumLevel.Value ?? 9);
+        bool mipSplit = ChkMipSplit.IsChecked ?? false;
+        byte[]? key = GetKeyBytes();
 
         await RunOp(async (ct, prog) => {
-            await _processor.CompressFilesToArchiveAsync(map, saveFile.Path.LocalPath, true, level, null, false, prog, ct, method);
+            await _processor.CompressFilesToArchiveAsync(map, saveFile.Path.LocalPath, true, level, key, mipSplit, prog, ct, method);
         });
         UpdateStatus("Packed successfully.");
+    }
+
+    private void UpdateKeys()
+    {
+        byte[]? key = GetKeyBytes();
+        foreach (var arch in _openArchives) arch.DecryptionKey = key;
     }
 
     private async void BtnExtractSelected_Click(object sender, RoutedEventArgs e)
@@ -365,6 +402,8 @@ public partial class MainWindow : Window
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Extract To" });
         if (folders.Count == 0) return;
         string dest = folders[0].Path.LocalPath;
+
+        UpdateKeys();
 
         await RunOp(async (ct, prog) => {
             int i = 0;
@@ -387,13 +426,13 @@ public partial class MainWindow : Window
         UpdateStatus("Extraction complete.");
     }
 
-
-
     private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
     {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Extract To" });
         if (folders.Count == 0) return;
         string dest = folders[0].Path.LocalPath;
+
+        UpdateKeys();
 
         await RunOp(async (ct, prog) => {
             int i = 0;

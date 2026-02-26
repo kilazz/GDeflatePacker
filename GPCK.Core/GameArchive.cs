@@ -106,15 +106,39 @@ namespace GPCK.Core
             var info = new PackageInfo { FilePath = FilePath, Magic = MagicStr, Version = Version, FileCount = FileCount, TotalSize = _view.Capacity };
             for(int i=0; i < FileCount; i++) {
                 var e = GetEntryByIndex(i);
+                string meta = "";
+                if ((e.Flags & TYPE_TEXTURE) != 0)
+                {
+                    int w = (int)(e.Meta1 >> 16);
+                    int h = (int)(e.Meta1 & 0xFFFF);
+                    int mips = (int)(e.Meta2 >> 24);
+                    int tail = (int)(e.Meta2 & 0xFFFFFF);
+                    meta = $"{w}x{h} M:{mips}";
+                    if (tail > 0) meta += $" T:{tail/1024}KB";
+                }
+
                 info.Entries.Add(new PackageEntryInfo {
                     Path = GetPathForAssetId(e.AssetId) ?? e.AssetId.ToString(),
                     AssetId = e.AssetId, Offset = e.DataOffset, OriginalSize = e.OriginalSize, CompressedSize = e.CompressedSize,
-                    Method = (e.Flags & MASK_METHOD) switch { METHOD_GDEFLATE => "GDeflate", METHOD_ZSTD => "Zstd", METHOD_LZ4 => "LZ4", _ => "Store" }
+                    Method = (e.Flags & MASK_METHOD) switch { METHOD_GDEFLATE => "GDeflate", METHOD_ZSTD => "Zstd", METHOD_LZ4 => "LZ4", _ => "Store" },
+                    MetadataInfo = meta
                 });
             }
             return info;
         }
 
-        public void Dispose() { _view.Dispose(); _mmf.Dispose(); _dataFileStream.Dispose(); _gtocFileStream.Dispose(); }
+        public void Dispose() {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing) {
+            if (disposing) {
+                _view?.Dispose();
+                _mmf?.Dispose();
+                _dataFileStream?.Dispose();
+                _gtocFileStream?.Dispose();
+            }
+        }
     }
 }

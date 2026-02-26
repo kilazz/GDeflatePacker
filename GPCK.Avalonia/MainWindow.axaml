@@ -25,6 +25,7 @@
 						<Rectangle Width="1" Height="20" Fill="#EEE" VerticalAlignment="Center" Margin="4,0"/>
 						<Button Name="BtnExtractSelected" Content="Extract Selected" Classes="ModernBtn" Click="BtnExtractSelected_Click"/>
 						<Button Name="BtnExtractAll" Content="Extract All" Classes="ModernBtn" Click="BtnExtractAll_Click"/>
+						<Button Name="BtnVerify" Content="Verify" Classes="ModernBtn" Click="BtnVerify_Click"/>
 						<ComboBox Name="CmbMethod" Width="110" SelectedIndex="0" VerticalAlignment="Center" SelectionChanged="CmbMethod_SelectionChanged">
 							<ComboBoxItem Content="Auto"/>
 							<ComboBoxItem Content="Zstd"/>
@@ -34,6 +35,8 @@
 						</ComboBox>
 						<TextBlock Text="Lvl:" VerticalAlignment="Center" Margin="5,0,0,0" Foreground="#666" FontSize="12"/>
 						<NumericUpDown Name="NumLevel" Width="100" Minimum="1" Maximum="12" Value="6" VerticalAlignment="Center" FormatString="0"/>
+						<CheckBox Name="ChkMipSplit" Content="Mip Split" VerticalAlignment="Center" Margin="5,0"/>
+						<TextBox Name="TxtKey" Width="100" Watermark="Key (Opt)" PasswordChar="*" VerticalAlignment="Center" Margin="5,0"/>
 						<Button Name="BtnCompress" Content="🚀 Pack .gtoc" Classes="PrimaryBtn" Click="BtnCompress_Click" MinWidth="110"/>
 					</StackPanel>
 				</ScrollViewer>
