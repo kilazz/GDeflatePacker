@@ -240,7 +240,7 @@ namespace GPCK.Benchmark
             catch (Exception ex) { InitError = ex.Message; }
         }
 
-        public double RunDecompressionBatch(byte[] compressedData, int[] chunkSizes, long[] chunkOffsets, int totalOriginalSize)
+        public double RunDecompressionBatch(byte[] compressedData, int[] chunkSizes, long[] chunkOffsets, int totalOriginalSize, int headerSize = 4)
         {
             if (!IsSupported) return 0;
 
@@ -272,7 +272,7 @@ namespace GPCK.Benchmark
                     DSTORAGE_REQUEST req = new();
                     req.SetOptions(DStorageConstants.DSTORAGE_REQUEST_SOURCE_MEMORY, DStorageConstants.DSTORAGE_REQUEST_DESTINATION_BUFFER, DStorageConstants.DSTORAGE_COMPRESSION_FORMAT_GDEFLATE);
 
-                    req.Source.Memory = new DSTORAGE_SOURCE_MEMORY { Source = pData + chunkOffsets[i] + 4, Size = (uint)chunkSizes[i] };
+                    req.Source.Memory = new DSTORAGE_SOURCE_MEMORY { Source = pData + chunkOffsets[i] + headerSize, Size = (uint)chunkSizes[i] };
                     req.Destination.Buffer = new DSTORAGE_DESTINATION_BUFFER { Resource = dstBuffer.Get(), Offset = outOffset, Size = 131072 };
                     req.UncompressedSize = 131072;
 

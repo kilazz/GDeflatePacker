@@ -303,6 +303,12 @@ namespace GPCK.Benchmark
         }
         static void RunCustomFileBenchmark(string filePath)
         {
+            if (filePath.EndsWith(".gtoc", StringComparison.OrdinalIgnoreCase))
+            {
+                RunArchiveBenchmark(filePath);
+                return;
+            }
+
             AnsiConsole.MarkupLine($"[bold white]--- Custom File Benchmark: {Path.GetFileName(filePath)} ---[/]");
 
             if (!File.Exists(filePath))
@@ -312,7 +318,17 @@ namespace GPCK.Benchmark
             }
 
             byte[] rawData = File.ReadAllBytes(filePath);
-            AnsiConsole.MarkupLine($"File Size: [cyan]{rawData.Length / 1024.0 / 1024.0:F2} MB[/]");
+            string sizeStr = rawData.Length < 1024 * 1024
+                ? $"{rawData.Length / 1024.0:F2} KB"
+                : $"{rawData.Length / 1024.0 / 1024.0:F2} MB";
+
+            AnsiConsole.MarkupLine($"File Size: [cyan]{sizeStr}[/]");
+
+            if (rawData.Length < 1024 * 1024)
+            {
+                AnsiConsole.MarkupLine("[yellow]WARNING: File is too small for accurate GPU benchmarking.[/]");
+                AnsiConsole.MarkupLine("[gray]GPU decompression has initialization overhead. Use files > 10 MB for realistic results.[/]");
+            }
 
             var table = new Table().Border(TableBorder.Rounded);
             table.AddColumn("Method");
@@ -335,6 +351,134 @@ namespace GPCK.Benchmark
                 else
                 {
                     table.AddRow("GDeflate", "N/A", "N/A", "[yellow]Not Available[/]");
+                }
+            });
+
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[gray]Press Enter to exit...[/]");
+            Console.ReadLine();
+        }
+
+        static void RunArchiveBenchmark(string gtocPath)
+        {
+            AnsiConsole.MarkupLine($"[bold white]--- Archive Benchmark: {Path.GetFileName(gtocPath)} ---[/]");
+
+            string gdatPath = Path.ChangeExtension(gtocPath, ".gdat");
+            if (!File.Exists(gdatPath))
+            {
+                AnsiConsole.MarkupLine($"[red]Error: Data file not found: {gdatPath}[/]");
+                return;
+            }
+
+            using var archive = new GameArchive(gtocPath);
+            AnsiConsole.MarkupLine($"Files in Archive: [cyan]{archive.FileCount}[/]");
+
+            // Find GDeflate entries
+            var entries = new List<GameArchive.FileEntry>();
+            long totalCompSize = 0;
+            long totalOrigSize = 0;
+
+            for (int i = 0; i < archive.FileCount; i++)
+            {
+                var entry = archive.GetEntryByIndex(i);
+                if ((entry.Flags & GameArchive.MASK_METHOD) == GameArchive.METHOD_GDEFLATE)
+                {
+                    entries.Add(entry);
+                    totalCompSize += entry.CompressedSize;
+                    totalOrigSize += entry.OriginalSize;
+                }
+            }
+
+            if (entries.Count == 0)
+            {
+                AnsiConsole.MarkupLine("[yellow]No GDeflate compressed files found in this archive.[/]");
+                return;
+            }
+
+            AnsiConsole.MarkupLine($"GDeflate Assets: [cyan]{entries.Count}[/] (Comp: {totalCompSize/1024.0/1024.0:F2} MB, Orig: {totalOrigSize/1024.0/1024.0:F2} MB)");
+            AnsiConsole.WriteLine();
+
+            // Limit to 512MB to avoid OOM
+            long limit = 512 * 1024 * 1024;
+            long currentSize = 0;
+            var testEntries = new List<GameArchive.FileEntry>();
+            foreach(var e in entries) {
+                if (currentSize + e.CompressedSize > limit) break;
+                testEntries.Add(e);
+                currentSize += e.CompressedSize;
+            }
+
+            AnsiConsole.MarkupLine($"Benchmarking subset: [cyan]{testEntries.Count}[/] files ({currentSize/1024.0/1024.0:F2} MB compressed)");
+
+            // Preload data into RAM to isolate decompression speed
+            var loadedData = new List<(byte[] Data, ChunkTable.ChunkInfo[] Chunks, long[] Offsets)>();
+
+            AnsiConsole.Status().Start("Preloading data...", ctx => {
+                using var handle = archive.GetFileHandle();
+                foreach(var entry in testEntries) {
+                    // Read Chunk Table
+                    byte[] tableBuffer = new byte[entry.ChunkCount * 8];
+                    archive.ReadGtoc(tableBuffer, entry.ChunkTableOffset);
+                    var chunks = ChunkTable.Read(tableBuffer, entry.ChunkCount);
+
+                    // Read Data
+                    byte[] data = new byte[entry.CompressedSize];
+                    RandomAccess.Read(handle, data, entry.DataOffset);
+
+                    // Calculate offsets
+                    long[] offsets = new long[entry.ChunkCount];
+                    long acc = 0;
+                    for(int k=0; k<entry.ChunkCount; k++) {
+                        offsets[k] = acc;
+                        acc += chunks[k].CompressedSize;
+                    }
+
+                    loadedData.Add((data, chunks, offsets));
+                }
+            });
+
+            var table = new Table().Border(TableBorder.Rounded);
+            table.AddColumn("Method");
+            table.AddColumn("Decompress Speed");
+
+            AnsiConsole.Live(table).Start(ctx => {
+                // CPU Benchmark
+                var sw = Stopwatch.StartNew();
+                long totalDec = 0;
+                foreach(var item in loadedData) {
+                    byte[] outBuf = new byte[item.Chunks.Sum(c => c.OriginalSize)];
+                    unsafe { fixed(byte* pIn = item.Data, pOut = outBuf) {
+                        for(int k=0; k<item.Chunks.Length; k++) {
+                            CodecGDeflate.Decompress(pOut + (k*131072), item.Chunks[k].OriginalSize, pIn + item.Offsets[k], item.Chunks[k].CompressedSize, 1);
+                        }
+                    }}
+                    totalDec += outBuf.Length;
+                }
+                sw.Stop();
+                double cpuSpeed = (totalDec / 1024.0 / 1024.0) / sw.Elapsed.TotalSeconds;
+                table.AddRow("GDeflate (CPU)", $"[green]{cpuSpeed:F0} MB/s[/]");
+                ctx.Refresh();
+
+                // GPU Benchmark
+                try {
+                    using var gpu = new GpuDirectStorage();
+                    if (gpu.IsSupported) {
+                        sw.Restart();
+                        totalDec = 0;
+                        foreach(var item in loadedData) {
+                            int[] sizes = item.Chunks.Select(c => (int)c.CompressedSize).ToArray();
+                            // Pass headerSize = 0 because archive data is raw stream without per-chunk headers
+                            double t = gpu.RunDecompressionBatch(item.Data, sizes, item.Offsets, item.Chunks.Sum(c => (int)c.OriginalSize), 0);
+                            totalDec += item.Chunks.Sum(c => (int)c.OriginalSize);
+                        }
+                        sw.Stop();
+                        double gpuSpeed = (totalDec / 1024.0 / 1024.0) / sw.Elapsed.TotalSeconds;
+                        table.AddRow("GDeflate (GPU)", $"[bold cyan]{gpuSpeed:F0} MB/s[/]");
+                    } else {
+                        table.AddRow("GDeflate (GPU)", "[dim]Unavailable[/]");
+                    }
+                } catch (Exception ex) {
+                    table.AddRow("GDeflate (GPU)", $"[red]Error: {ex.Message}[/]");
                 }
             });
 
