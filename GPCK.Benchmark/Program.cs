@@ -1,13 +1,7 @@
-using System;
-using System.Diagnostics;
-using System.IO;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using GPCK.Core;
 using Spectre.Console;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace GPCK.Benchmark
 {
@@ -95,7 +89,8 @@ namespace GPCK.Benchmark
                 ctx.Refresh();
 
                 if (CodecLZ4.IsAvailable()) { RunTest("LZ4 (HC L9)", rawData, 9, CompressLZ4, DecompressLZ4, table); ctx.Refresh(); }
-                if (CodecGDeflate.IsAvailable()) {
+                if (CodecGDeflate.IsAvailable())
+                {
                     RunTest("GDeflate (CPU L12)", rawData, 12, CompressGDeflate, DecompressGDeflate, table); ctx.Refresh();
                     RunGpuBenchmark(rawData, 12, table); ctx.Refresh();
                 }
@@ -115,14 +110,17 @@ namespace GPCK.Benchmark
             int smallFileCount = 3000;
             int largeFileCount = 30; // Increased for better IO saturation
 
-            AnsiConsole.Status().Start($"Building complex package ({smallFileCount} JSON, {largeFileCount} DDS)...", ctx => {
-                for (int i = 0; i < smallFileCount; i++) {
+            AnsiConsole.Status().Start($"Building complex package ({smallFileCount} JSON, {largeFileCount} DDS)...", ctx =>
+            {
+                for (int i = 0; i < smallFileCount; i++)
+                {
                     string p = Path.Combine(dummyDir, $"metadata/node_{i:D4}.json");
                     string? dir = Path.GetDirectoryName(p);
                     if (dir != null) Directory.CreateDirectory(dir);
                     File.WriteAllText(p, "{ \"id\": " + i + ", \"salt\": \"" + Guid.NewGuid() + "\", \"payload\": \"STRESS_METADATA_LATENCY\" }");
                 }
-                for (int i = 0; i < largeFileCount; i++) {
+                for (int i = 0; i < largeFileCount; i++)
+                {
                     string p = Path.Combine(dummyDir, $"textures/tex_4k_aligned_{i:D2}.dds");
                     string? dir = Path.GetDirectoryName(p);
                     if (dir != null) Directory.CreateDirectory(dir);
@@ -147,8 +145,10 @@ namespace GPCK.Benchmark
             // 2. Raw Disk IO (Isolating disk speed from decompression)
             long rawIoRead = 0;
             sw.Restart();
-            Parallel.ForEach(ddsEntries, new ParallelOptions { MaxDegreeOfParallelism = 8 }, rel => {
-                if (archive.TryGetEntry(AssetIdGenerator.Generate(rel), out var entry)) {
+            Parallel.ForEach(ddsEntries, new ParallelOptions { MaxDegreeOfParallelism = 8 }, rel =>
+            {
+                if (archive.TryGetEntry(AssetIdGenerator.Generate(rel), out var entry))
+                {
                     byte[] buffer = new byte[entry.CompressedSize];
                     RandomAccess.Read(archive.GetFileHandle(), buffer, entry.DataOffset);
                     Interlocked.Add(ref rawIoRead, buffer.Length);
@@ -159,8 +159,10 @@ namespace GPCK.Benchmark
             // 3. Parallel VFS (With Decompression overhead)
             long vfsRead = 0;
             sw.Restart();
-            Parallel.ForEach(ddsEntries, new ParallelOptions { MaxDegreeOfParallelism = 8 }, rel => {
-                if (archive.TryGetEntry(AssetIdGenerator.Generate(rel), out var entry)) {
+            Parallel.ForEach(ddsEntries, new ParallelOptions { MaxDegreeOfParallelism = 8 }, rel =>
+            {
+                if (archive.TryGetEntry(AssetIdGenerator.Generate(rel), out var entry))
+                {
                     using var stream = archive.OpenRead(entry);
                     byte[] buffer = new byte[128 * 1024];
                     int read;
@@ -173,15 +175,18 @@ namespace GPCK.Benchmark
             long slackSpace = 0;
             int misalignedCount = 0;
             var entriesByOffset = new List<GameArchive.FileEntry>();
-            for (int i = 0; i < archive.FileCount; i++) {
+            for (int i = 0; i < archive.FileCount; i++)
+            {
                 entriesByOffset.Add(archive.GetEntryByIndex(i));
             }
             entriesByOffset.Sort((a, b) => a.DataOffset.CompareTo(b.DataOffset));
 
-            for (int i = 0; i < entriesByOffset.Count; i++) {
+            for (int i = 0; i < entriesByOffset.Count; i++)
+            {
                 var entry = entriesByOffset[i];
                 if ((entry.Flags & GameArchive.MASK_METHOD) == GameArchive.METHOD_GDEFLATE && (entry.DataOffset % 4096 != 0)) misalignedCount++;
-                if (i > 0) {
+                if (i > 0)
+                {
                     var prev = entriesByOffset[i - 1];
                     long gap = entry.DataOffset - (prev.DataOffset + prev.CompressedSize);
                     if (gap > 0 && gap < 131072) slackSpace += gap;
@@ -198,7 +203,7 @@ namespace GPCK.Benchmark
             resTable.AddRow("VFS Parallel (Path A)", $"[bold cyan]{vfsSpeedPar:F1} MB/s[/]", vfsSpeedPar > (rawDiskSpeed * 0.7) ? "[green]OPTIMAL[/]" : "[yellow]CPU_TAX_HIGH[/]");
             resTable.AddRow("Decompression Tax", $"{((rawDiskSpeed - vfsSpeedPar) / rawDiskSpeed * 100):F1}%", "[dim]CPU Overhead[/]");
             resTable.AddRow("GPU Ready (Path B)", misalignedCount == 0 ? "[green]0 Alignment Errors[/]" : $"[red]{misalignedCount} ERRORS[/]", "[bold green]VALID[/]");
-            resTable.AddRow("Alignment Slack", $"{slackSpace / 1024} KB", $"{(double)slackSpace/archiveSize*100:F2}% ([green]IDEAL[/])");
+            resTable.AddRow("Alignment Slack", $"{slackSpace / 1024} KB", $"{(double)slackSpace / archiveSize * 100:F2}% ([green]IDEAL[/])");
 
             AnsiConsole.Write(resTable);
             if (Directory.Exists(dummyDir)) Directory.Delete(dummyDir, true);
@@ -228,7 +233,8 @@ namespace GPCK.Benchmark
 
         static void RunTest(string name, byte[] input, int level, Func<byte[], int, byte[]> compressor, Func<byte[], int, byte[]> decompressor, Table table)
         {
-            try {
+            try
+            {
                 var sw = Stopwatch.StartNew();
                 byte[] compressed = compressor(input, level);
                 double compTime = sw.Elapsed.TotalSeconds;
@@ -236,67 +242,91 @@ namespace GPCK.Benchmark
                 sw.Restart();
                 for (int i = 0; i < 3; i++) decompressor(compressed, input.Length);
                 double decompSpeed = (input.Length / 1024.0 / 1024.0) / (sw.Elapsed.TotalSeconds / 3.0);
-                table.AddRow(name, $"{(double)compressed.Length / input.Length * 100:F1}%", $"{(input.Length/1024.0/1024.0)/compTime:F0} MB/s", $"[bold green]{decompSpeed:F0} MB/s[/]");
-            } catch (Exception ex) { table.AddRow(name, "ERR", "ERR", $"[red]{Markup.Escape(ex.Message)}[/]"); }
+                table.AddRow(name, $"{(double)compressed.Length / input.Length * 100:F1}%", $"{(input.Length / 1024.0 / 1024.0) / compTime:F0} MB/s", $"[bold green]{decompSpeed:F0} MB/s[/]");
+            }
+            catch (Exception ex) { table.AddRow(name, "ERR", "ERR", $"[red]{Markup.Escape(ex.Message)}[/]"); }
         }
 
         static void RunGpuBenchmark(byte[] input, int level, Table table)
         {
-            try {
+            try
+            {
                 byte[] compressed = CompressGDeflate(input, level, false);
                 using var gpu = new GpuDirectStorage();
                 if (!gpu.IsSupported) { table.AddRow("GDeflate (GPU)", "-", "N/A", $"[dim yellow]Unavailable[/]"); return; }
                 using var ms = new MemoryStream(compressed); using var br = new BinaryReader(ms);
                 int numChunks = br.ReadInt32(); int[] sizes = new int[numChunks]; long[] offsets = new long[numChunks]; long curr = ms.Position;
-                for(int i=0; i<numChunks; i++) { offsets[i] = curr; int s = br.ReadInt32(); if (s == -1) { int rs = br.ReadInt32(); br.BaseStream.Seek(rs, SeekOrigin.Current); curr += 8 + rs; sizes[i] = rs; } else { br.BaseStream.Seek(s, SeekOrigin.Current); curr += 4 + s; sizes[i] = s; } }
+                for (int i = 0; i < numChunks; i++) { offsets[i] = curr; int s = br.ReadInt32(); if (s == -1) { int rs = br.ReadInt32(); br.BaseStream.Seek(rs, SeekOrigin.Current); curr += 8 + rs; sizes[i] = rs; } else { br.BaseStream.Seek(s, SeekOrigin.Current); curr += 4 + s; sizes[i] = s; } }
                 gpu.RunDecompressionBatch(compressed, sizes, offsets, input.Length);
                 double t = 0; for (int i = 0; i < 3; i++) t += gpu.RunDecompressionBatch(compressed, sizes, offsets, input.Length);
                 double speed = (input.Length / 1024.0 / 1024.0) / (t / 3.0);
                 table.AddRow("GDeflate (GPU)", $"{(double)compressed.Length / input.Length * 100:F1}%", "N/A", $"[bold cyan]{speed:F0} MB/s[/]");
-            } catch (Exception ex) { table.AddRow("GDeflate (GPU)", "ERR", "N/A", $"[red]{Markup.Escape(ex.Message)}[/]"); }
+            }
+            catch (Exception ex) { table.AddRow("GDeflate (GPU)", "ERR", "N/A", $"[red]{Markup.Escape(ex.Message)}[/]"); }
         }
 
-        static byte[] CompressLZ4(byte[] input, int level) {
+        static byte[] CompressLZ4(byte[] input, int level)
+        {
             int bound = CodecLZ4.LZ4_compressBound(input.Length); byte[] output = new byte[bound];
             unsafe { fixed (byte* pI = input, pO = output) { int sz = (level > 3) ? CodecLZ4.LZ4_compress_HC((IntPtr)pI, (IntPtr)pO, input.Length, bound, level) : CodecLZ4.LZ4_compress_default((IntPtr)pI, (IntPtr)pO, input.Length, bound); Array.Resize(ref output, sz); return output; } }
         }
-        static byte[] DecompressLZ4(byte[] input, int outS) {
-            byte[] output = new byte[outS]; unsafe { fixed(byte* pI = input, pO = output) { CodecLZ4.LZ4_decompress_safe((IntPtr)pI, (IntPtr)pO, input.Length, outS); } } return output;
+        static byte[] DecompressLZ4(byte[] input, int outS)
+        {
+            byte[] output = new byte[outS]; unsafe { fixed (byte* pI = input, pO = output) { CodecLZ4.LZ4_decompress_safe((IntPtr)pI, (IntPtr)pO, input.Length, outS); } }
+            return output;
         }
-        static byte[] CompressZstd(byte[] input, int level) {
+        static byte[] CompressZstd(byte[] input, int level)
+        {
             ulong bound = CodecZstd.ZSTD_compressBound((ulong)input.Length); byte[] output = new byte[bound];
             unsafe { fixed (byte* pI = input, pO = output) { ulong sz = CodecZstd.ZSTD_compress((IntPtr)pO, bound, (IntPtr)pI, (ulong)input.Length, level); Array.Resize(ref output, (int)sz); return output; } }
         }
-        static byte[] DecompressZstd(byte[] input, int outS) {
-            byte[] output = new byte[outS]; unsafe { fixed(byte* pI = input, pO = output) { CodecZstd.ZSTD_decompress((IntPtr)pO, (ulong)outS, (IntPtr)pI, (ulong)input.Length); } } return output;
+        static byte[] DecompressZstd(byte[] input, int outS)
+        {
+            byte[] output = new byte[outS]; unsafe { fixed (byte* pI = input, pO = output) { CodecZstd.ZSTD_decompress((IntPtr)pO, (ulong)outS, (IntPtr)pI, (ulong)input.Length); } }
+            return output;
         }
         static byte[] CompressGDeflate(byte[] input, int level) => CompressGDeflate(input, level, true);
-        static byte[] CompressGDeflate(byte[] input, int level, bool bypass) {
+        static byte[] CompressGDeflate(byte[] input, int level, bool bypass)
+        {
             using var ms = new MemoryStream(); using var bw = new BinaryWriter(ms);
             int numChunks = (input.Length + 131071) / 131072; bw.Write(numChunks);
             byte[] scratch = new byte[CodecGDeflate.CompressBound(131072)];
-            unsafe { fixed (byte* pI = input, pS = scratch) {
-                for(int i=0; i<numChunks; i++) {
-                    int off = i * 131072; int sz = Math.Min(131072, input.Length - off); ulong outS = (ulong)scratch.Length;
-                    if (CodecGDeflate.Compress(pS, ref outS, pI + off, (ulong)sz, (uint)level, 0) && (!bypass || outS < (ulong)sz)) { bw.Write((int)outS); bw.Write(new ReadOnlySpan<byte>(scratch, 0, (int)outS)); }
-                    else { bw.Write(-1); bw.Write(sz); bw.Write(new ReadOnlySpan<byte>(input, off, sz)); }
+            unsafe
+            {
+                fixed (byte* pI = input, pS = scratch)
+                {
+                    for (int i = 0; i < numChunks; i++)
+                    {
+                        int off = i * 131072; int sz = Math.Min(131072, input.Length - off); ulong outS = (ulong)scratch.Length;
+                        if (CodecGDeflate.Compress(pS, ref outS, pI + off, (ulong)sz, (uint)level, 0) && (!bypass || outS < (ulong)sz)) { bw.Write((int)outS); bw.Write(new ReadOnlySpan<byte>(scratch, 0, (int)outS)); }
+                        else { bw.Write(-1); bw.Write(sz); bw.Write(new ReadOnlySpan<byte>(input, off, sz)); }
+                    }
                 }
-            }}
+            }
             return ms.ToArray();
         }
-        static byte[] DecompressGDeflate(byte[] input, int outS) {
+        static byte[] DecompressGDeflate(byte[] input, int outS)
+        {
             byte[] output = new byte[outS]; using var ms = new MemoryStream(input); using var br = new BinaryReader(ms);
             int chunks = br.ReadInt32(); int[] sizes = new int[chunks]; long[] offsets = new long[chunks]; long curr = ms.Position;
-            for(int i=0; i<chunks; i++) { offsets[i] = curr; int s = br.ReadInt32(); if (s == -1) { int rs = br.ReadInt32(); br.BaseStream.Seek(rs, SeekOrigin.Current); curr += 8 + rs; } else { br.BaseStream.Seek(s, SeekOrigin.Current); curr += 4 + s; } sizes[i] = s; }
-            Parallel.For(0, chunks, i => { unsafe { fixed (byte* pIn = input, pOut = output) {
-                int target = Math.Min(131072, outS - (i * 131072));
-                if (sizes[i] == -1) Buffer.MemoryCopy(pIn + offsets[i] + 8, pOut + (i * 131072), target, target);
-                else CodecGDeflate.Decompress(pOut + (i * 131072), (ulong)target, pIn + offsets[i] + 4, (ulong)sizes[i], 1);
-            }}});
+            for (int i = 0; i < chunks; i++) { offsets[i] = curr; int s = br.ReadInt32(); if (s == -1) { int rs = br.ReadInt32(); br.BaseStream.Seek(rs, SeekOrigin.Current); curr += 8 + rs; } else { br.BaseStream.Seek(s, SeekOrigin.Current); curr += 4 + s; } sizes[i] = s; }
+            Parallel.For(0, chunks, i =>
+            {
+                unsafe
+                {
+                    fixed (byte* pIn = input, pOut = output)
+                    {
+                        int target = Math.Min(131072, outS - (i * 131072));
+                        if (sizes[i] == -1) Buffer.MemoryCopy(pIn + offsets[i] + 8, pOut + (i * 131072), target, target);
+                        else CodecGDeflate.Decompress(pOut + (i * 131072), (ulong)target, pIn + offsets[i] + 4, (ulong)sizes[i], 1);
+                    }
+                }
+            });
             return output;
         }
 
-        static byte[] GenerateRealisticGameData(int size) {
+        static byte[] GenerateRealisticGameData(int size)
+        {
             byte[] data = new byte[size]; Random rnd = new Random(42);
             for (int k = 0; k < size; k++) { double pattern = Math.Sin(k * 0.05) * 60 + Math.Cos(k * 0.001) * 40; data[k] = (byte)(128 + (int)pattern + rnd.Next(0, 48)); }
             return data;
@@ -395,27 +425,30 @@ namespace GPCK.Benchmark
                 return;
             }
 
-            AnsiConsole.MarkupLine($"GDeflate Assets: [cyan]{entries.Count}[/] (Comp: {totalCompSize/1024.0/1024.0:F2} MB, Orig: {totalOrigSize/1024.0/1024.0:F2} MB)");
+            AnsiConsole.MarkupLine($"GDeflate Assets: [cyan]{entries.Count}[/] (Comp: {totalCompSize / 1024.0 / 1024.0:F2} MB, Orig: {totalOrigSize / 1024.0 / 1024.0:F2} MB)");
             AnsiConsole.WriteLine();
 
             // Limit to 512MB to avoid OOM
             long limit = 512 * 1024 * 1024;
             long currentSize = 0;
             var testEntries = new List<GameArchive.FileEntry>();
-            foreach(var e in entries) {
+            foreach (var e in entries)
+            {
                 if (currentSize + e.CompressedSize > limit) break;
                 testEntries.Add(e);
                 currentSize += e.CompressedSize;
             }
 
-            AnsiConsole.MarkupLine($"Benchmarking subset: [cyan]{testEntries.Count}[/] files ({currentSize/1024.0/1024.0:F2} MB compressed)");
+            AnsiConsole.MarkupLine($"Benchmarking subset: [cyan]{testEntries.Count}[/] files ({currentSize / 1024.0 / 1024.0:F2} MB compressed)");
 
             // Preload data into RAM to isolate decompression speed
             var loadedData = new List<(byte[] Data, ChunkTable.ChunkInfo[] Chunks, long[] Offsets)>();
 
-            AnsiConsole.Status().Start("Preloading data...", ctx => {
+            AnsiConsole.Status().Start("Preloading data...", ctx =>
+            {
                 using var handle = archive.GetFileHandle();
-                foreach(var entry in testEntries) {
+                foreach (var entry in testEntries)
+                {
                     // Read Chunk Table
                     byte[] tableBuffer = new byte[entry.ChunkCount * 8];
                     archive.ReadGtoc(tableBuffer, entry.ChunkTableOffset);
@@ -428,7 +461,8 @@ namespace GPCK.Benchmark
                     // Calculate offsets
                     long[] offsets = new long[entry.ChunkCount];
                     long acc = 0;
-                    for(int k=0; k<entry.ChunkCount; k++) {
+                    for (int k = 0; k < entry.ChunkCount; k++)
+                    {
                         offsets[k] = acc;
                         acc += chunks[k].CompressedSize;
                     }
@@ -441,17 +475,24 @@ namespace GPCK.Benchmark
             table.AddColumn("Method");
             table.AddColumn("Decompress Speed");
 
-            AnsiConsole.Live(table).Start(ctx => {
+            AnsiConsole.Live(table).Start(ctx =>
+            {
                 // CPU Benchmark
                 var sw = Stopwatch.StartNew();
                 long totalDec = 0;
-                foreach(var item in loadedData) {
+                foreach (var item in loadedData)
+                {
                     byte[] outBuf = new byte[item.Chunks.Sum(c => c.OriginalSize)];
-                    unsafe { fixed(byte* pIn = item.Data, pOut = outBuf) {
-                        for(int k=0; k<item.Chunks.Length; k++) {
-                            CodecGDeflate.Decompress(pOut + (k*131072), item.Chunks[k].OriginalSize, pIn + item.Offsets[k], item.Chunks[k].CompressedSize, 1);
+                    unsafe
+                    {
+                        fixed (byte* pIn = item.Data, pOut = outBuf)
+                        {
+                            for (int k = 0; k < item.Chunks.Length; k++)
+                            {
+                                CodecGDeflate.Decompress(pOut + (k * 131072), item.Chunks[k].OriginalSize, pIn + item.Offsets[k], item.Chunks[k].CompressedSize, 1);
+                            }
                         }
-                    }}
+                    }
                     totalDec += outBuf.Length;
                 }
                 sw.Stop();
@@ -460,9 +501,11 @@ namespace GPCK.Benchmark
                 ctx.Refresh();
 
                 // GPU Benchmark (Batched)
-                try {
+                try
+                {
                     using var gpu = new GpuDirectStorage();
-                    if (gpu.IsSupported) {
+                    if (gpu.IsSupported)
+                    {
                         // Prepare Batch: Merge all files into one request to simulate level load
                         // and minimize D3D12 resource creation overhead.
                         long totalBatchCompSize = loadedData.Sum(x => x.Data.Length);
@@ -476,11 +519,11 @@ namespace GPCK.Benchmark
                         long dataPtr = 0;
                         int chunkPtr = 0;
 
-                        foreach(var item in loadedData)
+                        foreach (var item in loadedData)
                         {
                             Array.Copy(item.Data, 0, batchData, dataPtr, item.Data.Length);
 
-                            for(int k=0; k<item.Chunks.Length; k++)
+                            for (int k = 0; k < item.Chunks.Length; k++)
                             {
                                 batchSizes[chunkPtr] = (int)item.Chunks[k].CompressedSize;
                                 batchOffsets[chunkPtr] = dataPtr + item.Offsets[k]; // Offset relative to start of batch
@@ -496,16 +539,20 @@ namespace GPCK.Benchmark
                         sw.Restart();
                         // Run 3 times to get stable average
                         double t = 0;
-                        for(int i=0; i<3; i++)
-                             t += gpu.RunDecompressionBatch(batchData, batchSizes, batchOffsets, totalBatchOrigSize, 0);
+                        for (int i = 0; i < 3; i++)
+                            t += gpu.RunDecompressionBatch(batchData, batchSizes, batchOffsets, totalBatchOrigSize, 0);
                         sw.Stop();
 
                         double gpuSpeed = (totalBatchOrigSize / 1024.0 / 1024.0) / (t / 3.0);
                         table.AddRow("GDeflate (GPU)", $"[bold cyan]{gpuSpeed:F0} MB/s[/] (Batched)");
-                    } else {
+                    }
+                    else
+                    {
                         table.AddRow("GDeflate (GPU)", "[dim]Unavailable[/]");
                     }
-                } catch (Exception ex) {
+                }
+                catch (Exception ex)
+                {
                     table.AddRow("GDeflate (GPU)", $"[red]Error: {ex.Message}[/]");
                 }
             });

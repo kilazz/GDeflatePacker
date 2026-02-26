@@ -1,9 +1,5 @@
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
+using System.Runtime.InteropServices;
 using Buffer = Silk.NET.Vulkan.Buffer;
 
 namespace GPCK.Core.Vulkan
@@ -322,9 +318,11 @@ namespace GPCK.Core.Vulkan
             // For now, we return 4 bytes so it doesn't crash allocation logic immediately,
             // BUT calling CreateShaderModule on this will fail validation layers if checked.
             // In a real run, load from file: File.ReadAllBytes("gdeflate.spv");
-            try {
-                if(File.Exists("gdeflate.spv")) return File.ReadAllBytes("gdeflate.spv");
-            } catch {}
+            try
+            {
+                if (File.Exists("gdeflate.spv")) return File.ReadAllBytes("gdeflate.spv");
+            }
+            catch { }
             return new byte[32]; // invalid
         }
 
@@ -347,7 +345,7 @@ namespace GPCK.Core.Vulkan
             // 2. Upload Data (Map Memory)
             void* pData;
             _vk.MapMemory(_device, inMem, 0, (ulong)compressedData.Length, 0, &pData);
-            fixed(byte* ptr = compressedData)
+            fixed (byte* ptr = compressedData)
             {
                 System.Buffer.MemoryCopy(ptr, pData, compressedData.Length, compressedData.Length);
             }
@@ -431,7 +429,7 @@ namespace GPCK.Core.Vulkan
 
             // 7. Download Data
             _vk.MapMemory(_device, outMem, 0, (ulong)outputData.Length, 0, &pData);
-            fixed(byte* ptr = outputData)
+            fixed (byte* ptr = outputData)
             {
                 System.Buffer.MemoryCopy(pData, ptr, outputData.Length, outputData.Length);
             }

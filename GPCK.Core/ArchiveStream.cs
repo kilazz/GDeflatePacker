@@ -1,9 +1,5 @@
-using System;
 using System.Buffers;
-using System.IO;
 using System.Security.Cryptography;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace GPCK.Core
 {
@@ -126,9 +122,11 @@ namespace GPCK.Core
             uint origSize = _chunkTable![index].OriginalSize;
 
             byte[] compBuffer = ArrayPool<byte>.Shared.Rent((int)compSize);
-            try {
+            try
+            {
                 int bytesRead = 0;
-                while (bytesRead < compSize) {
+                while (bytesRead < compSize)
+                {
                     int r = RandomAccess.Read(_archive.GetFileHandle(), compBuffer.AsSpan(bytesRead, (int)compSize - bytesRead), offset + bytesRead);
                     if (r <= 0) throw new EndOfStreamException($"Unexpected end of file. Read {bytesRead}/{compSize} bytes.");
                     bytesRead += r;
@@ -136,7 +134,8 @@ namespace GPCK.Core
                 if (_currentChunkData == null || _currentChunkData.Length < origSize) _currentChunkData = new byte[origSize];
                 DecompressInternal(compBuffer.AsSpan(0, (int)compSize), _currentChunkData, origSize);
                 _currentChunkIndex = index;
-            } finally { ArrayPool<byte>.Shared.Return(compBuffer); }
+            }
+            finally { ArrayPool<byte>.Shared.Return(compBuffer); }
         }
 
         private unsafe void DecompressInternal(ReadOnlySpan<byte> source, byte[] destination, uint targetSize)
@@ -146,7 +145,8 @@ namespace GPCK.Core
 
             fixed (byte* pSrc = source, pDst = destination)
             {
-                bool success = _method switch {
+                bool success = _method switch
+                {
                     GameArchive.METHOD_GDEFLATE => CodecGDeflate.Decompress(pDst, targetSize, pSrc, (ulong)source.Length, 1),
                     GameArchive.METHOD_ZSTD => CodecZstd.ZSTD_decompress((IntPtr)pDst, targetSize, (IntPtr)pSrc, (ulong)source.Length) < (ulong)uint.MaxValue,
                     GameArchive.METHOD_LZ4 => CodecLZ4.LZ4_decompress_safe((IntPtr)pSrc, (IntPtr)pDst, source.Length, (int)targetSize) >= 0,
@@ -156,7 +156,8 @@ namespace GPCK.Core
             }
         }
 
-        public override long Seek(long offset, SeekOrigin origin) {
+        public override long Seek(long offset, SeekOrigin origin)
+        {
             _position = Math.Clamp(origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => _position + offset, SeekOrigin.End => Length + offset, _ => _position }, 0, Length);
             return _position;
         }

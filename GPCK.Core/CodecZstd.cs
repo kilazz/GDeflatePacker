@@ -1,4 +1,3 @@
-using System;
 using System.Runtime.InteropServices;
 
 namespace GPCK.Core
@@ -7,21 +6,25 @@ namespace GPCK.Core
     /// Native wrapper for Zstandard (libzstd.dll).
     /// Used for high-ratio CPU compression of non-GPU assets (Scripts, JSON, Physics).
     /// </summary>
-    public static class CodecZstd
+    public static partial class CodecZstd
     {
         private const string DllName = "libzstd.dll";
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong ZSTD_compressBound(ulong srcSize);
+        [LibraryImport(DllName, EntryPoint = "ZSTD_compressBound")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static partial ulong ZSTD_compressBound(ulong srcSize);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong ZSTD_compress(IntPtr dst, ulong dstCapacity, IntPtr src, ulong srcSize, int compressionLevel);
+        [LibraryImport(DllName, EntryPoint = "ZSTD_compress")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static partial ulong ZSTD_compress(IntPtr dst, ulong dstCapacity, IntPtr src, ulong srcSize, int compressionLevel);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong ZSTD_decompress(IntPtr dst, ulong dstCapacity, IntPtr src, ulong compressedSize);
+        [LibraryImport(DllName, EntryPoint = "ZSTD_decompress")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static partial ulong ZSTD_decompress(IntPtr dst, ulong dstCapacity, IntPtr src, ulong compressedSize);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
-        public static extern uint ZSTD_isError(ulong code);
+        [LibraryImport(DllName, EntryPoint = "ZSTD_isError")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static partial uint ZSTD_isError(ulong code);
 
         public static bool IsAvailable()
         {

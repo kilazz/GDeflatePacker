@@ -1,13 +1,6 @@
-using System;
-using System.Buffers;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace GPCK.Core
 {
@@ -56,7 +49,8 @@ namespace GPCK.Core
             var processed = new ConcurrentBag<ProcessedFile>();
             int count = 0;
 
-            await Parallel.ForEachAsync(fileMap, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (kvp, ct) => {
+            await Parallel.ForEachAsync(fileMap, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = token }, async (kvp, ct) =>
+            {
                 await ProcessFile(kvp.Key, kvp.Value, level, key, mipSplit, forceMethod, processed, ct);
                 progress?.Report((int)(Interlocked.Increment(ref count) / (float)fileMap.Count * 80));
             });
@@ -71,9 +65,11 @@ namespace GPCK.Core
             CompressionMethod method = force == CompressionMethod.Auto ? (input.EndsWith(".dds", StringComparison.OrdinalIgnoreCase) ? CompressionMethod.GDeflate : CompressionMethod.Zstd) : force;
 
             uint m1 = 0, m2 = 0;
-            if (input.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)) {
+            if (input.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+            {
                 var h = DdsUtils.GetHeaderInfo(raw);
-                if (h.HasValue) {
+                if (h.HasValue)
+                {
                     m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
 
                     if (mipSplit)
@@ -109,7 +105,8 @@ namespace GPCK.Core
             int alignPower = (int)Math.Log2(align);
             flags |= (uint)(alignPower << GameArchive.SHIFT_ALIGNMENT);
 
-            outBag.Add(new ProcessedFile {
+            outBag.Add(new ProcessedFile
+            {
                 AssetId = AssetIdGenerator.Generate(rel),
                 OriginalPath = rel,
                 OriginalSize = (uint)raw.Length,
@@ -131,11 +128,13 @@ namespace GPCK.Core
             int blocks = input.Length == 0 ? 1 : (input.Length + ChunkSize - 1) / ChunkSize;
 
             var entries = new List<ChunkTable.ChunkInfo>();
-            for (int i = 0; i < blocks; i++) {
+            for (int i = 0; i < blocks; i++)
+            {
                 int size = Math.Min(ChunkSize, input.Length - i * ChunkSize);
                 byte[] chunk = new byte[size];
                 Array.Copy(input, i * ChunkSize, chunk, 0, size);
-                byte[] proc = method switch {
+                byte[] proc = method switch
+                {
                     CompressionMethod.GDeflate => CompressGDeflate(chunk, level),
                     CompressionMethod.Zstd => CompressZstd(chunk, level),
                     CompressionMethod.LZ4 => CompressLZ4(chunk, level),
@@ -151,12 +150,15 @@ namespace GPCK.Core
             return (ms.ToArray(), table, blocks);
         }
 
-        private byte[] CompressGDeflate(byte[] input, int level) {
+        private byte[] CompressGDeflate(byte[] input, int level)
+        {
             if (input.Length == 0) return Array.Empty<byte>();
             ulong bound = CodecGDeflate.CompressBound((ulong)input.Length);
             byte[] output = new byte[bound];
-            unsafe {
-                fixed(byte* pI = input, pO = output) {
+            unsafe
+            {
+                fixed (byte* pI = input, pO = output)
+                {
                     ulong outS = bound;
                     bool success = CodecGDeflate.Compress(pO, ref outS, pI, (ulong)input.Length, (uint)level, 0);
                     if (!success || outS >= (ulong)input.Length) return input;
@@ -166,12 +168,15 @@ namespace GPCK.Core
             }
         }
 
-        private byte[] CompressZstd(byte[] input, int level) {
+        private byte[] CompressZstd(byte[] input, int level)
+        {
             if (input.Length == 0) return Array.Empty<byte>();
             ulong bound = CodecZstd.ZSTD_compressBound((ulong)input.Length);
             byte[] output = new byte[bound];
-            unsafe {
-                fixed(byte* pI = input, pO = output) {
+            unsafe
+            {
+                fixed (byte* pI = input, pO = output)
+                {
                     ulong outS = CodecZstd.ZSTD_compress((IntPtr)pO, bound, (IntPtr)pI, (ulong)input.Length, level);
                     if (CodecZstd.ZSTD_isError(outS) != 0 || outS >= (ulong)input.Length) return input;
                     Array.Resize(ref output, (int)outS);
@@ -180,12 +185,15 @@ namespace GPCK.Core
             }
         }
 
-        private byte[] CompressLZ4(byte[] input, int level) {
+        private byte[] CompressLZ4(byte[] input, int level)
+        {
             if (input.Length == 0) return Array.Empty<byte>();
             int bound = CodecLZ4.LZ4_compressBound(input.Length);
             byte[] output = new byte[bound];
-            unsafe {
-                fixed (byte* pI = input, pO = output) {
+            unsafe
+            {
+                fixed (byte* pI = input, pO = output)
+                {
                     int outS = level > 3
                         ? CodecLZ4.LZ4_compress_HC((IntPtr)pI, (IntPtr)pO, input.Length, bound, level)
                         : CodecLZ4.LZ4_compress_default((IntPtr)pI, (IntPtr)pO, input.Length, bound);
@@ -196,7 +204,8 @@ namespace GPCK.Core
             }
         }
 
-        private byte[] Encrypt(byte[] data, byte[] key) {
+        private byte[] Encrypt(byte[] data, byte[] key)
+        {
             if (key.Length != 32) throw new ArgumentException("Key must be 32 bytes for AES-256-GCM");
             byte[] output = new byte[28 + data.Length];
             RandomNumberGenerator.Fill(output.AsSpan(0, 12));
@@ -316,10 +325,13 @@ namespace GPCK.Core
 
         public static bool IsCpuLibraryAvailable() => CodecGDeflate.IsAvailable();
         public PackageInfo InspectPackage(string path) { using var arch = new GameArchive(path); return arch.GetPackageInfo(); }
-        public async Task DecompressArchiveAsync(string path, string outDir, byte[]? key, IProgress<int>? progress) {
+        public async Task DecompressArchiveAsync(string path, string outDir, byte[]? key, IProgress<int>? progress)
+        {
             using var arch = new GameArchive(path) { DecryptionKey = key };
-            foreach(var e in arch.GetPackageInfo().Entries) {
-                if (arch.TryGetEntry(e.AssetId, out var entry)) {
+            foreach (var e in arch.GetPackageInfo().Entries)
+            {
+                if (arch.TryGetEntry(e.AssetId, out var entry))
+                {
                     string p = Path.Combine(outDir, e.Path); Directory.CreateDirectory(Path.GetDirectoryName(p)!);
                     using var s = arch.OpenRead(entry); using var df = File.Create(p); await s.CopyToAsync(df);
                 }
@@ -336,10 +348,13 @@ namespace GPCK.Core
 
                 Parallel.For(0, arch.FileCount, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, (i, state) =>
                 {
-                    try {
+                    try
+                    {
                         using var s = arch.OpenRead(arch.GetEntryByIndex(i));
                         s.CopyTo(Stream.Null);
-                    } catch {
+                    }
+                    catch
+                    {
                         allGood = false;
                         state.Stop();
                     }

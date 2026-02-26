@@ -1,12 +1,10 @@
-using System;
-using System.IO;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
-using TerraFX.Interop.Windows;
+using System.Runtime.InteropServices;
 using TerraFX.Interop.DirectX;
-using static TerraFX.Interop.Windows.Windows;
+using TerraFX.Interop.Windows;
 using static TerraFX.Interop.DirectX.DirectX;
+using static TerraFX.Interop.Windows.Windows;
 
 namespace GPCK.Benchmark
 {
@@ -195,7 +193,8 @@ namespace GPCK.Benchmark
                 _device.Get()->CheckFeatureSupport(D3D12_FEATURE.D3D12_FEATURE_SHADER_MODEL, &sm, (uint)sizeof(D3D12_FEATURE_DATA_SHADER_MODEL));
                 if (sm.HighestShaderModel < D3D_SHADER_MODEL.D3D_SHADER_MODEL_6_0) { InitError = "GPU must support Shader Model 6.0"; return; }
 
-                DSTORAGE_CONFIGURATION dsConfig = new() {
+                DSTORAGE_CONFIGURATION dsConfig = new()
+                {
                     NumBuiltInCpuDecompressionThreads = 0,
                     NumSubmitThreads = 1, // Use at least 1 submission thread
                     ForceMappingLayer = 0,
@@ -247,7 +246,8 @@ namespace GPCK.Benchmark
             ComPtr<ID3D12Resource> dstBuffer = default;
             D3D12_HEAP_PROPERTIES heapProps = new(D3D12_HEAP_TYPE.D3D12_HEAP_TYPE_DEFAULT);
 
-            D3D12_RESOURCE_DESC resDesc = new() {
+            D3D12_RESOURCE_DESC resDesc = new()
+            {
                 Dimension = D3D12_RESOURCE_DIMENSION.D3D12_RESOURCE_DIMENSION_BUFFER,
                 Alignment = 0,
                 Width = (ulong)totalOriginalSize,

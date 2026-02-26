@@ -1,8 +1,4 @@
-using System;
-using System.Buffers;
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
 
 namespace GPCK.Core
 {
@@ -96,8 +92,10 @@ namespace GPCK.Core
                 int currentOffset = headerSize;
                 int w = width; int h = height;
                 int splitOffset = -1; int cutMips = 0;
-                for (int i = 0; i < mips; i++) {
-                    if (splitOffset == -1 && w <= maxTailDim && h <= maxTailDim) {
+                for (int i = 0; i < mips; i++)
+                {
+                    if (splitOffset == -1 && w <= maxTailDim && h <= maxTailDim)
+                    {
                         splitOffset = currentOffset; cutMips = i; break;
                     }
                     int blocksW = Math.Max(1, (w + 3) / 4);
@@ -106,9 +104,13 @@ namespace GPCK.Core
                     if (w > 1) w /= 2; if (h > 1) h /= 2;
                 }
                 if (splitOffset == -1 || splitOffset >= fileData.Length) return null;
-                return new DdsSplitInfo {
-                    HeaderSize = headerSize, SplitOffset = splitOffset, CutMipCount = cutMips,
-                    LowResWidth = Math.Max(1, width >> cutMips), LowResHeight = Math.Max(1, height >> cutMips),
+                return new DdsSplitInfo
+                {
+                    HeaderSize = headerSize,
+                    SplitOffset = splitOffset,
+                    CutMipCount = cutMips,
+                    LowResWidth = Math.Max(1, width >> cutMips),
+                    LowResHeight = Math.Max(1, height >> cutMips),
                     LowResMipCount = mips - cutMips
                 };
             }
@@ -124,7 +126,8 @@ namespace GPCK.Core
             int totalSize = tailSize + payloadSize;
             byte[] result = new byte[totalSize];
             Array.Copy(source, 0, result, 0, info.HeaderSize);
-            fixed(byte* p = result) {
+            fixed (byte* p = result)
+            {
                 DDS_HEADER* h = (DDS_HEADER*)(p + 4);
                 h->dwWidth = (uint)info.LowResWidth; h->dwHeight = (uint)info.LowResHeight;
                 h->dwMipMapCount = (uint)info.LowResMipCount; h->dwPitchOrLinearSize = 0;

@@ -1,5 +1,3 @@
-using System;
-using System.IO;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -51,8 +49,8 @@ namespace GPCK.Core
             // so we try "GDeflate.dll" manually in root)
             if (fileName != libraryName)
             {
-                 string rootPath = Path.Combine(root, fileName);
-                 if (File.Exists(rootPath) && NativeLibrary.TryLoad(rootPath, out handle))
+                string rootPath = Path.Combine(root, fileName);
+                if (File.Exists(rootPath) && NativeLibrary.TryLoad(rootPath, out handle))
                     return handle;
             }
 

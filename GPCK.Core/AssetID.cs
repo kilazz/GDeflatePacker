@@ -1,7 +1,5 @@
-using System;
 using System.Buffers.Binary;
 using System.Text;
-using System.Runtime.InteropServices;
 
 namespace GPCK.Core
 {

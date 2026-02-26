@@ -1,10 +1,7 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
+using Microsoft.Win32.SafeHandles;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
-using Microsoft.Win32.SafeHandles;
 
 namespace GPCK.Core
 {
@@ -24,13 +21,15 @@ namespace GPCK.Core
         public byte[]? DecryptionKey { get; set; }
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
-        public struct ArchiveHeader {
+        public struct ArchiveHeader
+        {
             public int Magic, Version, FileCount, Padding;
             public long FileTableOffset, NameTableOffset;
         }
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
-        public struct FileEntry {
+        public struct FileEntry
+        {
             public Guid AssetId;
             public long DataOffset;
             public long ChunkTableOffset;
@@ -48,12 +47,14 @@ namespace GPCK.Core
         public const uint MASK_ALIGNMENT = 0xFF000000;
         public const int SHIFT_ALIGNMENT = 24;
 
-        public GameArchive(string path) {
+        public GameArchive(string path)
+        {
             FilePath = path;
             string gtocPath = Path.ChangeExtension(path, ".gtoc");
             string gdatPath = Path.ChangeExtension(path, ".gdat");
 
-            if (!File.Exists(gtocPath) && File.Exists(path)) {
+            if (!File.Exists(gtocPath) && File.Exists(path))
+            {
                 gtocPath = path;
                 gdatPath = path;
             }
@@ -66,20 +67,24 @@ namespace GPCK.Core
             _view.Read(0, out _header);
         }
 
-        public FileEntry GetEntryByIndex(int index) {
+        public FileEntry GetEntryByIndex(int index)
+        {
             _view.Read(_header.FileTableOffset + (index * 56), out FileEntry entry);
             return entry;
         }
 
         public SafeFileHandle GetFileHandle() => _dataFileStream.SafeFileHandle;
 
-        public void ReadGtoc(byte[] buffer, long offset) {
+        public void ReadGtoc(byte[] buffer, long offset)
+        {
             _view.ReadArray(offset, buffer, 0, buffer.Length);
         }
 
-        public bool TryGetEntry(Guid id, out FileEntry entry) {
+        public bool TryGetEntry(Guid id, out FileEntry entry)
+        {
             int l = 0, r = FileCount - 1;
-            while (l <= r) {
+            while (l <= r)
+            {
                 int m = l + (r - l) / 2;
                 FileEntry me = GetEntryByIndex(m);
                 int c = me.AssetId.CompareTo(id);
@@ -89,9 +94,11 @@ namespace GPCK.Core
             entry = default; return false;
         }
 
-        public string? GetPathForAssetId(Guid id) {
+        public string? GetPathForAssetId(Guid id)
+        {
             long p = _header.NameTableOffset;
-            for (int i = 0; i < FileCount; i++) {
+            for (int i = 0; i < FileCount; i++)
+            {
                 byte[] gb = new byte[16]; _view.ReadArray(p, gb, 0, 16);
                 ushort len = _view.ReadUInt16(p + 16);
                 if (new Guid(gb) == id) { byte[] nb = new byte[len]; _view.ReadArray(p + 18, nb, 0, len); return Encoding.UTF8.GetString(nb); }
@@ -102,9 +109,11 @@ namespace GPCK.Core
 
         public Stream OpenRead(FileEntry entry) => new ArchiveStream(this, entry);
 
-        public PackageInfo GetPackageInfo() {
+        public PackageInfo GetPackageInfo()
+        {
             var info = new PackageInfo { FilePath = FilePath, Magic = MagicStr, Version = Version, FileCount = FileCount, TotalSize = _view.Capacity };
-            for(int i=0; i < FileCount; i++) {
+            for (int i = 0; i < FileCount; i++)
+            {
                 var e = GetEntryByIndex(i);
                 string meta = "";
                 if ((e.Flags & TYPE_TEXTURE) != 0)
@@ -114,12 +123,16 @@ namespace GPCK.Core
                     int mips = (int)(e.Meta2 >> 24);
                     int tail = (int)(e.Meta2 & 0xFFFFFF);
                     meta = $"{w}x{h} M:{mips}";
-                    if (tail > 0) meta += $" T:{tail/1024}KB";
+                    if (tail > 0) meta += $" T:{tail / 1024}KB";
                 }
 
-                info.Entries.Add(new PackageEntryInfo {
+                info.Entries.Add(new PackageEntryInfo
+                {
                     Path = GetPathForAssetId(e.AssetId) ?? e.AssetId.ToString(),
-                    AssetId = e.AssetId, Offset = e.DataOffset, OriginalSize = e.OriginalSize, CompressedSize = e.CompressedSize,
+                    AssetId = e.AssetId,
+                    Offset = e.DataOffset,
+                    OriginalSize = e.OriginalSize,
+                    CompressedSize = e.CompressedSize,
                     Method = (e.Flags & MASK_METHOD) switch { METHOD_GDEFLATE => "GDeflate", METHOD_ZSTD => "Zstd", METHOD_LZ4 => "LZ4", _ => "Store" },
                     MetadataInfo = meta
                 });
@@ -127,13 +140,16 @@ namespace GPCK.Core
             return info;
         }
 
-        public void Dispose() {
+        public void Dispose()
+        {
             Dispose(true);
             GC.SuppressFinalize(this);
         }
 
-        protected virtual void Dispose(bool disposing) {
-            if (disposing) {
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
                 _view?.Dispose();
                 _mmf?.Dispose();
                 _dataFileStream?.Dispose();

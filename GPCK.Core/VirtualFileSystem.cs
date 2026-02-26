@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
 using System.Diagnostics.CodeAnalysis;
 
 namespace GPCK.Core
@@ -89,7 +85,7 @@ namespace GPCK.Core
 
         public bool TryGetEntryForId(Guid id, [NotNullWhen(true)] out GameArchive? archive, out GameArchive.FileEntry entry)
         {
-             if (_virtualLookup.TryGetValue(id, out int archiveIndex))
+            if (_virtualLookup.TryGetValue(id, out int archiveIndex))
             {
                 archive = _mountedArchives[archiveIndex];
                 return archive.TryGetEntry(id, out entry);

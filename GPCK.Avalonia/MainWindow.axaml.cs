@@ -1,4 +1,3 @@
-using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
@@ -190,9 +189,11 @@ public partial class MainWindow : Window
         {
             string path = folders[0].Path.LocalPath;
             UpdateStatus("Scanning folder...");
-            await Task.Run(() => {
+            await Task.Run(() =>
+            {
                 var map = AssetPacker.BuildFileMap(path);
-                Dispatcher.UIThread.Post(() => {
+                Dispatcher.UIThread.Post(() =>
+                {
                     foreach (var kv in map) AddFileItem(kv.Key, kv.Value);
                     RefreshFilter();
                     UpdateStatus("Folder added.");
@@ -220,7 +221,7 @@ public partial class MainWindow : Window
         _files.Clear();
         _filteredFiles.Clear();
         _blocks.Clear();
-        foreach(var a in _openArchives) a.Dispose();
+        foreach (var a in _openArchives) a.Dispose();
         _openArchives.Clear();
         ResetPreview();
         TxtListCount.Text = "0 items";
@@ -382,7 +383,8 @@ public partial class MainWindow : Window
         bool mipSplit = ChkMipSplit.IsChecked ?? false;
         byte[]? key = GetKeyBytes();
 
-        await RunOp(async (ct, prog) => {
+        await RunOp(async (ct, prog) =>
+        {
             await _processor.CompressFilesToArchiveAsync(map, saveFile.Path.LocalPath, true, level, key, mipSplit, prog, ct, method);
         });
         UpdateStatus("Packed successfully.");
@@ -405,7 +407,8 @@ public partial class MainWindow : Window
 
         UpdateKeys();
 
-        await RunOp(async (ct, prog) => {
+        await RunOp(async (ct, prog) =>
+        {
             int i = 0;
             foreach (var item in selectedItems)
             {
@@ -434,7 +437,8 @@ public partial class MainWindow : Window
 
         UpdateKeys();
 
-        await RunOp(async (ct, prog) => {
+        await RunOp(async (ct, prog) =>
+        {
             int i = 0;
             foreach (var item in _files)
             {
@@ -479,5 +483,5 @@ public partial class MainWindow : Window
     }
 
     private void UpdateStatus(string msg) => TxtStatus.Text = msg;
-    private string FormatSize(long b) => b < 1024 ? $"{b} B" : $"{b/1024.0/1024.0:F2} MB";
+    private string FormatSize(long b) => b < 1024 ? $"{b} B" : $"{b / 1024.0 / 1024.0:F2} MB";
 }

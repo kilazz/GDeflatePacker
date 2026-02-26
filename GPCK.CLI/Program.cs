@@ -1,12 +1,7 @@
-using System;
-using System.ComponentModel;
-using System.Diagnostics;
-using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 using GPCK.Core;
 using Spectre.Console;
 using Spectre.Console.Cli;
+using System.ComponentModel;
 
 namespace GPCK.CLI
 {
@@ -216,12 +211,12 @@ namespace GPCK.CLI
             table.AddColumn("Comp %");
             table.AddColumn("Method");
 
-            foreach(var e in info.Entries)
+            foreach (var e in info.Entries)
             {
                 double ratio = e.OriginalSize > 0 ? (double)e.CompressedSize / e.OriginalSize * 100 : 0;
                 table.AddRow(
-                    e.Path.Length > 50 ? "..." + e.Path.Substring(e.Path.Length-47) : e.Path,
-                    $"{e.OriginalSize/1024} KB",
+                    e.Path.Length > 50 ? "..." + e.Path.Substring(e.Path.Length - 47) : e.Path,
+                    $"{e.OriginalSize / 1024} KB",
                     $"{ratio:F0}%",
                     e.Method
                 );
@@ -247,7 +242,8 @@ namespace GPCK.CLI
             var packer = new AssetPacker();
             var map = AssetPacker.BuildFileMap(settings.Content);
 
-            await AnsiConsole.Progress().StartAsync(async ctx => {
+            await AnsiConsole.Progress().StartAsync(async ctx =>
+            {
                 var t = ctx.AddTask("Computing Deltas & Packing...");
                 await packer.CompressFilesToArchiveAsync(map, settings.Output, true, 9, null, false, null, cancellationToken);
                 t.Value = 100;

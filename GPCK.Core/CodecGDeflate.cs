@@ -1,11 +1,8 @@
-using System;
-using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace GPCK.Core
 {
-    public static class CodecGDeflate
+    public static partial class CodecGDeflate
     {
         private const string DllName = "GDeflate";
 
@@ -33,12 +30,14 @@ namespace GPCK.Core
             }
         }
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompressBound")]
-        public static extern ulong CompressBound(ulong size);
+        [LibraryImport(DllName, EntryPoint = "GDeflateCompressBound")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        public static partial ulong CompressBound(ulong size);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateCompress")]
+        [LibraryImport(DllName, EntryPoint = "GDeflateCompress")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
         [return: MarshalAs(UnmanagedType.I1)]
-        public static unsafe extern bool Compress(
+        public static unsafe partial bool Compress(
             void* output,
             ref ulong outputSize,
             void* input,
@@ -46,9 +45,10 @@ namespace GPCK.Core
             uint level,
             uint flags);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "GDeflateDecompress")]
+        [LibraryImport(DllName, EntryPoint = "GDeflateDecompress")]
+        [UnmanagedCallConv(CallConvs = new Type[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
         [return: MarshalAs(UnmanagedType.I1)]
-        public static unsafe extern bool Decompress(
+        public static unsafe partial bool Decompress(
             void* output,
             ulong outputSize,
             void* input,
