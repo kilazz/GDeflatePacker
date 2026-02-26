@@ -459,21 +459,49 @@ namespace GPCK.Benchmark
                 table.AddRow("GDeflate (CPU)", $"[green]{cpuSpeed:F0} MB/s[/]");
                 ctx.Refresh();
 
-                // GPU Benchmark
+                // GPU Benchmark (Batched)
                 try {
                     using var gpu = new GpuDirectStorage();
                     if (gpu.IsSupported) {
-                        sw.Restart();
-                        totalDec = 0;
-                        foreach(var item in loadedData) {
-                            int[] sizes = item.Chunks.Select(c => (int)c.CompressedSize).ToArray();
-                            // Pass headerSize = 0 because archive data is raw stream without per-chunk headers
-                            double t = gpu.RunDecompressionBatch(item.Data, sizes, item.Offsets, item.Chunks.Sum(c => (int)c.OriginalSize), 0);
-                            totalDec += item.Chunks.Sum(c => (int)c.OriginalSize);
+                        // Prepare Batch: Merge all files into one request to simulate level load
+                        // and minimize D3D12 resource creation overhead.
+                        long totalBatchCompSize = loadedData.Sum(x => x.Data.Length);
+                        int totalBatchChunks = loadedData.Sum(x => x.Chunks.Length);
+                        int totalBatchOrigSize = loadedData.Sum(x => x.Chunks.Sum(c => (int)c.OriginalSize));
+
+                        byte[] batchData = new byte[totalBatchCompSize];
+                        int[] batchSizes = new int[totalBatchChunks];
+                        long[] batchOffsets = new long[totalBatchChunks];
+
+                        long dataPtr = 0;
+                        int chunkPtr = 0;
+
+                        foreach(var item in loadedData)
+                        {
+                            Array.Copy(item.Data, 0, batchData, dataPtr, item.Data.Length);
+
+                            for(int k=0; k<item.Chunks.Length; k++)
+                            {
+                                batchSizes[chunkPtr] = (int)item.Chunks[k].CompressedSize;
+                                batchOffsets[chunkPtr] = dataPtr + item.Offsets[k]; // Offset relative to start of batch
+                                chunkPtr++;
+                            }
+                            dataPtr += item.Data.Length;
                         }
+
+                        // Warmup
+                        gpu.RunDecompressionBatch(batchData, batchSizes, batchOffsets, totalBatchOrigSize, 0);
+
+                        // Measure
+                        sw.Restart();
+                        // Run 3 times to get stable average
+                        double t = 0;
+                        for(int i=0; i<3; i++)
+                             t += gpu.RunDecompressionBatch(batchData, batchSizes, batchOffsets, totalBatchOrigSize, 0);
                         sw.Stop();
-                        double gpuSpeed = (totalDec / 1024.0 / 1024.0) / sw.Elapsed.TotalSeconds;
-                        table.AddRow("GDeflate (GPU)", $"[bold cyan]{gpuSpeed:F0} MB/s[/]");
+
+                        double gpuSpeed = (totalBatchOrigSize / 1024.0 / 1024.0) / (t / 3.0);
+                        table.AddRow("GDeflate (GPU)", $"[bold cyan]{gpuSpeed:F0} MB/s[/] (Batched)");
                     } else {
                         table.AddRow("GDeflate (GPU)", "[dim]Unavailable[/]");
                     }
