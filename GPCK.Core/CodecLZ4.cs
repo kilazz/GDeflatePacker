@@ -12,24 +12,24 @@ namespace GPCK.Core
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int LZ4_compress_default(
-            IntPtr src, 
-            IntPtr dst, 
-            int srcSize, 
+            IntPtr src,
+            IntPtr dst,
+            int srcSize,
             int dstCapacity);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int LZ4_compress_HC(
-            IntPtr src, 
-            IntPtr dst, 
-            int srcSize, 
-            int dstCapacity, 
+            IntPtr src,
+            IntPtr dst,
+            int srcSize,
+            int dstCapacity,
             int compressionLevel);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int LZ4_decompress_safe(
-            IntPtr src, 
-            IntPtr dst, 
-            int compressedSize, 
+            IntPtr src,
+            IntPtr dst,
+            int compressedSize,
             int dstCapacity);
 
         public static bool IsAvailable()

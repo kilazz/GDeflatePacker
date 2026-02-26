@@ -7,7 +7,7 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 	<ItemGroup>
-		<!-- 
+		<!--
             Native Libraries Configuration
             Structure: runtimes/{rid}/native/{lib}
             This allows .NET to automatically load the correct library for the OS/Arch.

@@ -23,7 +23,7 @@ namespace GPCK.Core
         private byte[]? _currentChunkData;
         private int _currentChunkIndex = -1;
 
-        private GameArchive.ChunkHeaderEntry[]? _chunkTable;
+        private ChunkTable.ChunkInfo[]? _chunkTable;
         private long _dataStartOffset;
 
         public ArchiveStream(GameArchive archive, GameArchive.FileEntry entry)
@@ -37,7 +37,10 @@ namespace GPCK.Core
             _method = entry.Flags & GameArchive.MASK_METHOD;
 
             if (_isEncrypted && _archive.DecryptionKey != null)
+            {
+                if (_archive.DecryptionKey.Length != 32) throw new ArgumentException("Key must be 32 bytes for AES-256-GCM");
                 _aes = new AesGcm(_archive.DecryptionKey, 16);
+            }
 
             if (_isChunked) InitializeChunkTable();
         }
@@ -45,7 +48,6 @@ namespace GPCK.Core
         private void InitializeChunkTable()
         {
             int count = _entry.ChunkCount;
-            _chunkTable = new GameArchive.ChunkHeaderEntry[count];
 
             if (_aes != null)
             {
@@ -56,26 +58,15 @@ namespace GPCK.Core
                 byte[] decTable = new byte[count * 8];
                 _aes.Decrypt(encTable.AsSpan(0, 12), encTable.AsSpan(28), encTable.AsSpan(12, 16), decTable);
 
-                for (int i = 0; i < count; i++)
-                {
-                    _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
-                        CompressedSize = BitConverter.ToUInt32(decTable, i * 8),
-                        OriginalSize = BitConverter.ToUInt32(decTable, i * 8 + 4)
-                    };
-                }
+                _chunkTable = ChunkTable.Read(decTable, count);
             }
             else
             {
                 byte[] tableBuffer = new byte[count * 8];
                 _archive.ReadGtoc(tableBuffer, _entry.ChunkTableOffset);
-                for (int i = 0; i < count; i++)
-                {
-                    _chunkTable[i] = new GameArchive.ChunkHeaderEntry {
-                        CompressedSize = BitConverter.ToUInt32(tableBuffer, i * 8),
-                        OriginalSize = BitConverter.ToUInt32(tableBuffer, i * 8 + 4)
-                    };
-                }
+                _chunkTable = ChunkTable.Read(tableBuffer, count);
             }
+
             _dataStartOffset = _entry.DataOffset;
         }
 

@@ -44,7 +44,7 @@ namespace GPCK.Core
         {
             if (!Directory.Exists(physicalPath))
                 throw new DirectoryNotFoundException($"Directory not found: {physicalPath}");
-            
+
             // Insert at the beginning so directories have the highest priority
             _mountedDirectories.Insert(0, physicalPath);
         }

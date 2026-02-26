@@ -38,9 +38,6 @@ namespace GPCK.Core
             public int ChunkCount;
         }
 
-        [StructLayout(LayoutKind.Sequential, Pack = 1)]
-        public struct ChunkHeaderEntry { public uint CompressedSize, OriginalSize; }
-
         public const uint FLAG_IS_COMPRESSED = 1 << 0;
         public const uint FLAG_ENCRYPTED_META = 1 << 1;
         public const uint MASK_METHOD = 0x1C;
@@ -63,7 +60,7 @@ namespace GPCK.Core
 
             _gtocFileStream = new FileStream(gtocPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             _dataFileStream = new FileStream(gdatPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            
+
             _mmf = MemoryMappedFile.CreateFromFile(_gtocFileStream, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, false);
             _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
             _view.Read(0, out _header);

@@ -112,7 +112,7 @@ namespace GPCK.Core
             using var bw = new BinaryWriter(ms);
             int blocks = input.Length == 0 ? 1 : (input.Length + ChunkSize - 1) / ChunkSize;
 
-            var entries = new List<GameArchive.ChunkHeaderEntry>();
+            var entries = new List<ChunkTable.ChunkInfo>();
             for (int i = 0; i < blocks; i++) {
                 int size = Math.Min(ChunkSize, input.Length - i * ChunkSize);
                 byte[] chunk = new byte[size];
@@ -123,15 +123,11 @@ namespace GPCK.Core
                     CompressionMethod.LZ4 => CompressLZ4(chunk, level),
                     _ => chunk
                 };
-                entries.Add(new GameArchive.ChunkHeaderEntry { CompressedSize = (uint)proc.Length, OriginalSize = (uint)size });
+                entries.Add(new ChunkTable.ChunkInfo { CompressedSize = (uint)proc.Length, OriginalSize = (uint)size });
                 bw.Write(proc);
             }
 
-            byte[] table = new byte[blocks * 8];
-            for (int i = 0; i < blocks; i++) {
-                BitConverter.TryWriteBytes(table.AsSpan(i * 8, 4), entries[i].CompressedSize);
-                BitConverter.TryWriteBytes(table.AsSpan(i * 8 + 4, 4), entries[i].OriginalSize);
-            }
+            byte[] table = ChunkTable.Write(entries);
             if (key != null) table = Encrypt(table, key);
 
             return (ms.ToArray(), table, blocks);
@@ -183,6 +179,7 @@ namespace GPCK.Core
         }
 
         private byte[] Encrypt(byte[] data, byte[] key) {
+            if (key.Length != 32) throw new ArgumentException("Key must be 32 bytes for AES-256-GCM");
             byte[] output = new byte[28 + data.Length];
             RandomNumberGenerator.Fill(output.AsSpan(0, 12));
             using var aes = new AesGcm(key, 16);

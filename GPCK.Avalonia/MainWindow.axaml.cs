@@ -387,6 +387,8 @@ public partial class MainWindow : Window
         UpdateStatus("Extraction complete.");
     }
 
+
+
     private async void BtnExtractAll_Click(object sender, RoutedEventArgs e)
     {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = "Extract To" });

@@ -26,6 +26,28 @@ namespace GPCK.Benchmark
                 AnsiConsole.MarkupLine($"[gray]Execution Path: {AppContext.BaseDirectory}[/]");
                 AnsiConsole.WriteLine();
 
+                if (args.Length > 0 && File.Exists(args[0]))
+                {
+                    RunCustomFileBenchmark(args[0]);
+                    return;
+                }
+
+                AnsiConsole.MarkupLine("Select Mode:");
+                AnsiConsole.MarkupLine("[[1]] Standard Benchmark Suite (Synthetic Data)");
+                AnsiConsole.MarkupLine("[[2]] Custom File Benchmark (Real Data)");
+                AnsiConsole.Write("Choice: ");
+                var key = Console.ReadKey().KeyChar;
+                AnsiConsole.WriteLine();
+                AnsiConsole.WriteLine();
+
+                if (key == '2')
+                {
+                    AnsiConsole.Markup("Enter file path: ");
+                    string path = Console.ReadLine()?.Trim('"') ?? "";
+                    RunCustomFileBenchmark(path);
+                    return;
+                }
+
                 PrintSystemReport();
 
                 double hostMemorySpeed = MeasureHostMemoryBandwidth();
@@ -278,6 +300,47 @@ namespace GPCK.Benchmark
             byte[] data = new byte[size]; Random rnd = new Random(42);
             for (int k = 0; k < size; k++) { double pattern = Math.Sin(k * 0.05) * 60 + Math.Cos(k * 0.001) * 40; data[k] = (byte)(128 + (int)pattern + rnd.Next(0, 48)); }
             return data;
+        }
+        static void RunCustomFileBenchmark(string filePath)
+        {
+            AnsiConsole.MarkupLine($"[bold white]--- Custom File Benchmark: {Path.GetFileName(filePath)} ---[/]");
+
+            if (!File.Exists(filePath))
+            {
+                AnsiConsole.MarkupLine($"[red]File not found: {filePath}[/]");
+                return;
+            }
+
+            byte[] rawData = File.ReadAllBytes(filePath);
+            AnsiConsole.MarkupLine($"File Size: [cyan]{rawData.Length / 1024.0 / 1024.0:F2} MB[/]");
+
+            var table = new Table().Border(TableBorder.Rounded);
+            table.AddColumn("Method");
+            table.AddColumn("Ratio");
+            table.AddColumn("Compress Speed");
+            table.AddColumn("Decompress Speed");
+
+            AnsiConsole.Live(table).Start(ctx =>
+            {
+                // GDeflate CPU
+                if (CodecGDeflate.IsAvailable())
+                {
+                    RunTest("GDeflate (CPU L12)", rawData, 12, CompressGDeflate, DecompressGDeflate, table);
+                    ctx.Refresh();
+
+                    // GDeflate GPU
+                    RunGpuBenchmark(rawData, 12, table);
+                    ctx.Refresh();
+                }
+                else
+                {
+                    table.AddRow("GDeflate", "N/A", "N/A", "[yellow]Not Available[/]");
+                }
+            });
+
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[gray]Press Enter to exit...[/]");
+            Console.ReadLine();
         }
     }
 }
