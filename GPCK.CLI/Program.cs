@@ -76,7 +76,26 @@ namespace GPCK.CLI
             AnsiConsole.MarkupLine($"[bold green]Packing:[/] {settings.Input} -> {output} (Method: {settings.Method})");
 
             var packer = new AssetPacker();
-            var map = AssetPacker.BuildFileMap(settings.Input);
+            Dictionary<string, string> map;
+
+            if (File.Exists(settings.Input))
+            {
+                // Single file mode
+                map = new Dictionary<string, string>
+                {
+                    { settings.Input, Path.GetFileName(settings.Input) }
+                };
+            }
+            else if (Directory.Exists(settings.Input))
+            {
+                // Directory mode
+                map = AssetPacker.BuildFileMap(settings.Input);
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[bold red]Error:[/] Input path '{settings.Input}' not found.");
+                return 1;
+            }
 
             await AnsiConsole.Progress()
                 .StartAsync(async ctx =>

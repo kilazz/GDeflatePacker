@@ -34,10 +34,18 @@ namespace GPCK.Core
             public int ChunkCount;
         }
 
-        public static Dictionary<string, string> BuildFileMap(string sourceDirectory)
+        public static Dictionary<string, string> BuildFileMap(string inputPath)
         {
             var map = new Dictionary<string, string>();
-            string root = Path.GetFullPath(sourceDirectory);
+            if (File.Exists(inputPath))
+            {
+                map[inputPath] = Path.GetFileName(inputPath);
+                return map;
+            }
+
+            string root = Path.GetFullPath(inputPath);
+            if (!Directory.Exists(root)) return map;
+
             foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
                 map[file] = Path.GetRelativePath(root, file).Replace('\\', '/');
             return map;
@@ -67,8 +75,17 @@ namespace GPCK.Core
                 var h = DdsUtils.GetHeaderInfo(raw);
                 if (h.HasValue) {
                     m1 = ((uint)h.Value.Width << 16) | (uint)h.Value.Height;
-                    m2 = (uint)h.Value.MipCount << 8;
-                    if (mipSplit) raw = DdsUtils.ProcessTextureForStreaming(raw, out int tail);
+
+                    if (mipSplit)
+                    {
+                        raw = DdsUtils.ProcessTextureForStreaming(raw, out int tail);
+                        // Store MipCount in high 8 bits, Tail Size in low 24 bits
+                        m2 = ((uint)h.Value.MipCount << 24) | (uint)(tail & 0xFFFFFF);
+                    }
+                    else
+                    {
+                        m2 = (uint)h.Value.MipCount << 24;
+                    }
                 }
             }
 
